@@ -10,8 +10,6 @@ Copyright © 2026 Tim Meissner. All rights reserved.
 
 **"Redistribution"** means making copies of the Software available to other persons, whether in source code or compiled form.
 
-**"AI system"** means any third-party artificial intelligence system, AI-powered coding assistant, or automated code-generation tool capable of generating, rewriting, or modifying source code.
-
 ## 2. Permitted Use
 
 Permission is granted, free of charge, to any person who complies with this license to:
@@ -32,7 +30,6 @@ Redistribution of the Software, including modified versions and compiled binarie
 3. Modified versions must clearly identify that changes have been made.
 4. Redistribution must not be primarily intended for or directed toward commercial advantage or monetary compensation.
 5. No recipient may be granted rights to use or redistribute the Software beyond those permitted by this license.
-6. Redistribution must comply with the AI-related restrictions in Section 5.
 
 ## 4. Commercial Use Requires Permission
 
@@ -42,19 +39,7 @@ Commercial permission may be granted separately and subject to additional terms.
 
 Examples of activities that require permission may include selling the Software, incorporating it into a commercial product or service, or distributing it as part of a paid offering.
 
-## 5. AI-Assisted Modifications Intended for Publication
-
-Any person who intends to publish, distribute, or otherwise make available a modified version of the Software or its source code must not use third-party artificial intelligence systems or AI-powered coding tools to generate, rewrite, or modify any portion of the Software for that purpose without the prior explicit written permission of the copyright holder.
-
-This restriction applies regardless of whether the AI-generated or AI-modified code is subsequently reviewed, edited, or rewritten by a human.
-
-The restriction applies to AI-assisted modifications intended for publication or redistribution, whether the intended publication or redistribution is commercial or non-commercial.
-
-Private modifications that are not intended for publication or redistribution remain permitted under Section 2, subject to the other terms of this license.
-
-For the avoidance of doubt, this section does not prohibit ordinary human modifications intended for non-commercial redistribution, provided all other requirements of this license are met.
-
-## 6. Rights Reserved
+## 5. Rights Reserved
 
 All rights not expressly granted by this license are reserved by the copyright holder.
 
@@ -62,7 +47,7 @@ This license does not transfer ownership of the Software or grant any trademark 
 
 No rights are granted to use the Software for purposes or in ways not expressly permitted by this license.
 
-## 7. Termination
+## 6. Termination
 
 Any permission granted under this license terminates automatically if a recipient materially violates its terms, subject to applicable law.
 
@@ -70,7 +55,7 @@ Rights may be reinstated upon correction of the violation where permitted by app
 
 Termination does not affect rights or obligations that applicable law provides cannot be terminated.
 
-## 8. Disclaimer of Warranty and Liability
+## 7. Disclaimer of Warranty and Liability
 
 To the maximum extent permitted by applicable law, the Software is provided "AS IS", without warranties or conditions of any kind, express or implied.
 
@@ -78,7 +63,7 @@ To the maximum extent permitted by applicable law, the copyright holder shall no
 
 Nothing in this section excludes or limits liability where such exclusion or limitation is prohibited by applicable law.
 
-## 9. Applicable Law
+## 8. Applicable Law
 
 This license is intended to operate subject to applicable law, including mandatory provisions of German and European Union law where applicable.
 
