@@ -28,10 +28,19 @@ pub enum ClockSpeed{
 
 #[repr(usize)]
 pub enum DIVSpeed {
-    Zero    = 0,
-    Normal  = 16384,
-    Double  = 32768,
+    Zero   = 0,
+    Normal = 16384,
+    Double = 32768,
 }
 
 pub const TAC_SPEED: [[u32; 4]; 2] = [[4096, 262144, 65536, 16384],
                                   [8192, 524288, 131072, 32768]];
+
+#[repr(usize)]
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum PPUMode {
+    HBlank = 0,
+    VBlank = 1,
+    OAM    = 2,
+    VRAM   = 3,
+}

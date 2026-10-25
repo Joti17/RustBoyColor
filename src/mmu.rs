@@ -4,8 +4,8 @@ use std::io::{self, BufReader, Read, Write};
 use crate::initialize::initializable;
 use crate::mbc;
 use crate::mbc::*;
-use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, TAC_SPEED};
-
+use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, PPUMode, TAC_SPEED};
+use crate::ppu::PPU;
 
 const WRAM_OFFSET: usize = 0xC000;
 const WRAM_SIZE: usize = 0x8000;
@@ -28,14 +28,16 @@ pub struct MMU {
     current_wram_bank: usize,
 
     hram: [u8; HRAM_SIZE],
-    oam: [u8; OAM_SIZE],
     io: [u8; IO_SIZE],
+    ie: u8,
 
     mode: HardwareMode,
     cartridge: Cartridge,
-    mbc: Box<dyn mbc::MBC + 'static>,
+    mbc: Box<dyn MBC + 'static>,
     has_bios: bool,
     pub timer: Timer,
+    pub ppu: PPU,
+
 }
 
 pub struct Timer {
@@ -87,29 +89,52 @@ impl Timer {
 
             self.div = (self.internal_timer >> 8) as u8;
 
-            let tac_bit = match self.tac & 0x3 {
-                0 => 9,
-                1 => 3,
-                2 => 5,
-                _ => 7,
-            };
-
-            let old_signal = self.tac & 0x4 != 0
-                && old_counter & (1 << tac_bit) != 0;
-
-            let new_signal = self.tac & 0x4 != 0
-                && self.internal_timer & (1 << tac_bit) != 0;
-
-            if old_signal && !new_signal && self.tima_reload_delay.is_none() {
-                let (value, overflow) = self.tima.overflowing_add(1);
-
-                if overflow {
-                    self.tima = 0;
-                    self.tima_reload_delay = Some(4);
-                } else {
-                    self.tima = value;
-                }
+            if self.timer_signal(old_counter) && !self.timer_signal(self.internal_timer) {
+                self.increment_tima();
             }
+        }
+    }
+
+    fn timer_signal(&self, counter: u16) -> bool {
+        if self.tac & 0x04 == 0 {
+            return false;
+        }
+
+        let bit = match self.tac & 0x03 {
+            0 => 9,
+            1 => 3,
+            2 => 5,
+            _ => 7,
+        };
+        counter & (1 << bit) != 0
+    }
+
+    fn increment_tima(&mut self) {
+        if self.tima_reload_delay.is_some() {
+            return;
+        }
+
+        let (value, overflow) = self.tima.overflowing_add(1);
+        self.tima = value;
+        if overflow {
+            self.tima_reload_delay = Some(4);
+        }
+    }
+
+    fn reset_div(&mut self) {
+        let timer_was_high = self.timer_signal(self.internal_timer);
+        self.internal_timer = 0;
+        self.div = 0;
+        if timer_was_high {
+            self.increment_tima();
+        }
+    }
+
+    fn write_tac(&mut self, data: u8) {
+        let old_signal = self.timer_signal(self.internal_timer);
+        self.tac = data & 0x07;
+        if old_signal && !self.timer_signal(self.internal_timer) {
+            self.increment_tima();
         }
     }
 }
@@ -233,9 +258,6 @@ impl MMU {
         let mut wram= [0x00; WRAM_SIZE];
         random_array(&mut wram);
 
-        let mut oam = [0x00; OAM_SIZE];
-        random_array(&mut oam);
-
         let mut hram = [0x00; HRAM_SIZE];
         random_array(&mut hram);
 
@@ -276,12 +298,13 @@ impl MMU {
             current_wram_bank: 0,
             mode,
             cartridge,
-            oam,
             hram,
             io,
             mbc,
             has_bios,
             timer: Timer::new(),
+            ppu: PPU::new(),
+            ie: 0x00,
         }
 
         // n.load_rom(rom_file, &mut n.wram).unwrap();
@@ -296,7 +319,11 @@ impl MMU {
             return self.mbc.read_rom(addr);
         }
         if (0x8000..=0x9FFF).contains(&addr) {
-            println!("Tried to write to VRAM 0x{:x}", addr)
+            return if self.ppu.mode != PPUMode::VRAM {
+                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000]
+            } else {
+                0xFF
+            }
         }
         if (0xA000..=0xBFFF).contains(&addr) {
             return self.mbc.read_ram(addr);
@@ -314,24 +341,29 @@ impl MMU {
              return self.rb(addr - 0x2000);
         }
         if (0xFE00..=0xFE9F).contains(&addr) {
-            return self.oam[(addr - 0xFE00) as usize];
+            return if self.ppu.mode != PPUMode::OAM || self.ppu.mode != PPUMode::VRAM {
+                self.ppu.oam[(addr - 0xFE00) as usize]
+            } else {
+                0xFF
+            }
         }
         if (0xFF00..=0xFF7F).contains(&addr) {
             let reg = (addr - 0xFF00) as u8;
-            match reg {
-                0x04 => return self.timer.div,
-                0x05 => return self.timer.tima,
-                0x06 => return self.timer.tma | 0xF8,
-                0x07 => return self.timer.tac,
+            return match reg {
+                0x04 => self.timer.div,
+                0x05 => self.timer.tima,
+                0x06 => self.timer.tma,
+                0x07 => self.timer.tac | 0xF8,
+                0x4F => self.ppu.vram_bank | 0xFE,
                 0x50 => {
-                    return if self.has_bios {
+                    if self.has_bios {
                         0xFF
                     } else {
                         self.io[reg as usize]
-                    };
+                    }
                 }
                 _ => {
-                    return self.io[reg as usize];
+                    self.io[reg as usize]
                 }
             }
         }
@@ -339,9 +371,7 @@ impl MMU {
             return self.hram[(addr - 0xFF80) as usize];
         }
         if addr == 0xFFFF {
-            // IE register is usually at the end of HRAM or handled separately
-            // In this project it seems it's in IO or HRAM? 
-            // In CPU.rs, IE is 0xFFFF.
+            return self.ie | 0xE0;
         }
 
         0xFF
@@ -351,7 +381,9 @@ impl MMU {
         if addr < 0x8000 {
             self.mbc.write_rom(addr, data);
         } else if (0x8000..=0x9FFF).contains(&addr) {
-            // VRAM missing?
+            if self.ppu.mode != PPUMode::VRAM{
+                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000] = data;
+            }
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.mbc.write_ram(addr, data);
         } else if (0xC000..=0xDFFF).contains(&addr) {
@@ -366,7 +398,9 @@ impl MMU {
         } else if (0xE000..=0xFDFF).contains(&addr) {
             self.wb(addr - 0x2000, data);
         } else if (0xFE00..=0xFE9F).contains(&addr) {
-            self.oam[(addr - 0xFE00) as usize] = data;
+            if self.ppu.mode != PPUMode::OAM || self.ppu.mode != PPUMode::VRAM {
+                self.ppu.oam[(addr - 0xFE00) as usize] = data;
+            } // else it's ignored
         } else if (0xFF00..=0xFF7F).contains(&addr) {
             let reg = (addr - 0xFF00) as u8;
             match reg {
@@ -381,7 +415,7 @@ impl MMU {
                     }
                 }
                 0x04 => {
-                    self.timer.div = 0x00;
+                    self.timer.reset_div();
                 }
                 0x05 => {
                     if self.timer.tima_reload_delay.is_none() {
@@ -399,32 +433,9 @@ impl MMU {
                     }
                 }
                 0x07 => {
-                    let tac_bit = match self.timer.tac & 0x3 {
-                        0 => 9,
-                        1 => 3,
-                        2 => 5,
-                        _ => 7,
-                    };
-
-                    let old_signal = self.timer.tac & 0x4 != 0
-                        && self.timer.internal_timer & (1 << tac_bit) != 0;
-
-                    self.timer.tac = data & 0x07;
-
-                    let tac_bit = match self.timer.tac & 0x3 {
-                        0 => 9,
-                        1 => 3,
-                        2 => 5,
-                        _ => 7,
-                    };
-
-                    let new_signal = self.timer.tac & 0x4 != 0
-                        && self.timer.internal_timer & (1 << tac_bit) != 0;
-
-                    if old_signal && !new_signal {
-                        self.timer.tima = self.timer.tima.wrapping_add(1);
-                    }
+                    self.timer.write_tac(data);
                 }
+                0x4F => self.ppu.vram_bank = data & 0x01,
                 0x50 => {
                     if self.has_bios && data != 0 {
                         self.writeIO(reg, data);
@@ -441,7 +452,7 @@ impl MMU {
         } else if (0xFF80..=0xFFFE).contains(&addr) {
             self.hram[(addr - 0xFF80) as usize] = data;
         } else if addr == 0xFFFF {
-            // IE register
+            self.ie = data;
         }
     }
 
@@ -492,5 +503,45 @@ impl initializable for MMU{
         self.wb(0xFF4A, 0x00);
         self.wb(0xFF4B, 0x00);
         self.timer = Timer::new();
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::Timer;
+
+    #[test]
+    fn overflow_reloads_tima_and_requests_interrupt_after_four_cycles() {
+        let mut timer = Timer::new();
+        let mut interrupt_flags = 0;
+        timer.tac = 0x05;
+        timer.tima = 0xFF;
+        timer.tma = 0x42;
+
+        timer.tick(16, &mut interrupt_flags);
+        assert_eq!(timer.tima, 0);
+        assert_eq!(interrupt_flags & 0x04, 0);
+
+        timer.tick(3, &mut interrupt_flags);
+        assert_eq!(timer.tima, 0);
+        assert_eq!(interrupt_flags & 0x04, 0);
+
+        timer.tick(1, &mut interrupt_flags);
+        assert_eq!(timer.tima, 0x42);
+        assert_ne!(interrupt_flags & 0x04, 0);
+    }
+
+    #[test]
+    fn div_reset_clears_divider_and_applies_falling_edge() {
+        let mut timer = Timer::new();
+        timer.tac = 0x05;
+        timer.internal_timer = 8;
+        timer.div = 0x01;
+
+        timer.reset_div();
+
+        assert_eq!(timer.internal_timer, 0);
+        assert_eq!(timer.div, 0);
+        assert_eq!(timer.tima, 1);
     }
 }

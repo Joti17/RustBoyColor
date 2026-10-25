@@ -468,7 +468,7 @@ pub struct Cpu {
     halt: bool,
     stopped: bool,
     mode: HardwareMode,
-    speed: ClockSpeed,
+    pub speed: ClockSpeed,
     pub speed_change_timer: u16,
     halt_bug: bool,
 }
@@ -624,12 +624,19 @@ impl Cpu{
         // sleep(core::time::Duration::from_millis(10));
         let mut cycles = 67;
 
+        let interrupt_cycles = self.service_interrupt(mmu);
+        if interrupt_cycles != 0 {
+            return interrupt_cycles;
+        }
+        if self.halt {
+            return 4;
+        }
+
         if self.speed_change_timer > 0{
             self.speed_change_timer -= 4;
             return 4
         }
 
-        self.service_interrupt(mmu);
         self.last_instruction_length = instr.length as usize;
 
         if instr_opcode & 0xFF00 == 0xCB00 {
