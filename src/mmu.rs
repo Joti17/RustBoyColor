@@ -1,7 +1,8 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
-use crate::initialize::initializable;
+use crate::dma::DMA;
+use crate::initialize::Initializable;
 use crate::mbc;
 use crate::mbc::*;
 use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, PPUMode, TAC_SPEED};
@@ -37,6 +38,8 @@ pub struct MMU {
     has_bios: bool,
     pub timer: Timer,
     pub ppu: PPU,
+    pub cpu_external_stall: u8,
+    pub dma: DMA
 
 }
 
@@ -163,7 +166,7 @@ impl Cartridge {
 
     fn load_rom(&mut self, file_name: &str) -> io::Result<()>{
         self.rom.clear();
-        let file = BufReader::new(File::open(file_name).unwrap());
+        let file = BufReader::new(File::open(file_name)?);
         let mut reader = BufReader::new(file);
 
         reader.read_to_end(&mut self.rom)?;
@@ -305,6 +308,8 @@ impl MMU {
             timer: Timer::new(),
             ppu: PPU::new(),
             ie: 0x00,
+            cpu_external_stall: 0,
+            dma: DMA::new(),
         }
 
         // n.load_rom(rom_file, &mut n.wram).unwrap();
@@ -315,6 +320,17 @@ impl MMU {
     }
 
     pub fn rb(&self, addr: u16) -> u8 {
+        if self.dma.is_active()
+            && !(0xFF80..=0xFFFE).contains(&addr)
+            && addr != 0xFF46
+        {
+            return 0xFF;
+        }
+
+        self.rb_unrestricted(addr)
+    }
+
+    fn rb_unrestricted(&self, addr: u16) -> u8 {
         if addr < 0x8000 {
             return self.mbc.read_rom(addr);
         }
@@ -338,7 +354,7 @@ impl MMU {
             return self.wram[offset];
         }
         if (0xE000..=0xFDFF).contains(&addr) {
-             return self.rb(addr - 0x2000);
+             return self.rb_unrestricted(addr - 0x2000);
         }
         if (0xFE00..=0xFE9F).contains(&addr) {
             return if self.ppu.mode != PPUMode::OAM || self.ppu.mode != PPUMode::VRAM {
@@ -354,6 +370,7 @@ impl MMU {
                 0x05 => self.timer.tima,
                 0x06 => self.timer.tma,
                 0x07 => self.timer.tac | 0xF8,
+                0x46 => self.io[reg as usize],
                 0x4F => self.ppu.vram_bank | 0xFE,
                 0x50 => {
                     if self.has_bios {
@@ -378,6 +395,13 @@ impl MMU {
     }
 
     pub fn wb(&mut self, addr: u16, data: u8) {
+        if self.dma.is_active()
+            && !(0xFF80..=0xFFFE).contains(&addr)
+            && addr != 0xFF46
+        {
+            return;
+        }
+
         if addr < 0x8000 {
             self.mbc.write_rom(addr, data);
         } else if (0x8000..=0x9FFF).contains(&addr) {
@@ -435,6 +459,11 @@ impl MMU {
                 0x07 => {
                     self.timer.write_tac(data);
                 }
+                0x46 => {
+                    self.writeIO(reg, data);
+                    self.dma.start_transfer(data);
+
+                }
                 0x4F => self.ppu.vram_bank = data & 0x01,
                 0x50 => {
                     if self.has_bios && data != 0 {
@@ -456,6 +485,15 @@ impl MMU {
         }
     }
 
+    pub fn tick(&mut self, is_double_speed: bool, cycles: u16){
+        let mut dma = std::mem::replace(&mut self.dma, DMA::new());
+        dma.tick(cycles, is_double_speed, |address, index| {
+            let value = self.rb_unrestricted(address);
+            self.ppu.oam[index] = value;
+        });
+        self.dma = dma;
+    }
+
     pub fn ww(&mut self, addr: u16, data: u16) {
         self.wb(addr,(data & 0xFF) as u8);
         self.wb(addr+1, (data >> 8) as u8);
@@ -472,7 +510,7 @@ impl MMU {
         }
     }
 }
-impl initializable for MMU{
+impl Initializable for MMU{
     fn init(&mut self){
         if self.has_bios {self.wb(0xFF04, 0x00)} else {self.wb(0xFF04, 0xAB)}
         self.wb(0xFF05, 0x00);
@@ -503,6 +541,9 @@ impl initializable for MMU{
         self.wb(0xFF4A, 0x00);
         self.wb(0xFF4B, 0x00);
         self.timer = Timer::new();
+        self.ppu = PPU::new();
+        self.ie = 0x00;
+        self.cpu_external_stall = 0;
     }
 }
 

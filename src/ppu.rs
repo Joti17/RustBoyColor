@@ -6,13 +6,13 @@ const _FPS: f64 = 59.737;
 const DOTS_PER_SCAN_LINE: usize = 456;
 
 
-struct LCDC_Register {
+struct LcdcRegister {
     LCDC: u8,
 }
 
-impl LCDC_Register {
-    fn new(val: u8) -> LCDC_Register {
-        LCDC_Register {
+impl LcdcRegister {
+    fn new(val: u8) -> LcdcRegister {
+        LcdcRegister {
             LCDC: val,
         }
     }
@@ -58,20 +58,20 @@ impl LCDC_Register {
     }
 }
 
-impl Into<u8> for LCDC_Register {
+impl Into<u8> for LcdcRegister {
     fn into(self) -> u8 {
         self.LCDC
     }
 }
 
-impl From<u8> for LCDC_Register {
-    fn from(val: u8) -> LCDC_Register {
-        LCDC_Register::new(val)
+impl From<u8> for LcdcRegister {
+    fn from(val: u8) -> LcdcRegister {
+        LcdcRegister::new(val)
     }
 }
 
 pub struct PPU {
-    lcdc: LCDC_Register,
+    lcdc: LcdcRegister,
     stat: u8,
     scy: u8,
     scx: u8,
@@ -117,5 +117,27 @@ impl PPU {
 
     pub fn tick(&mut self, dots: u16){
 
+    }
+
+    fn oam_to_screen_position(&mut self, oam_index: usize) -> (i16, i16) {
+        let y = ((self.oam[oam_index] & 0xFF) as i16) - 16;
+        let x = ((self.oam[oam_index] >> 8) & 0xFF) as i16 - 8;
+        (x, y)
+    }
+
+    fn decode_tile_row(&self, tile_index: usize, row: u8, bank: usize) -> [u8; 8] {
+        if row > 7 {
+            panic!("Invalid tile row");
+        }
+        let tile_offset = (tile_index * 16) + (row as usize * 2);
+        let row_data = (self.vram[bank][tile_offset], self.vram[bank][tile_offset + 1]);
+        let mut pixels = [0; 8];
+        for i in 0..8 {
+            let bit = 7 - i;
+            pixels[i] = (((row_data.1 >> bit) & 0x01) << 1) | ((row_data.0 >> bit) & 0x01);
+        }
+
+
+        pixels
     }
 }

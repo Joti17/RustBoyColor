@@ -1,6 +1,6 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
 use std::time::{Duration, Instant};
-use crate::initialize::initializable;
+use crate::initialize::Initializable;
 use crate::mmu::MMU;
 use minifb::{Window, WindowOptions};
 use rand::prelude::IndexedRandom;
@@ -14,6 +14,7 @@ mod mode;
 mod initialize;
 mod ppu;
 mod input;
+mod dma;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
@@ -76,6 +77,7 @@ fn main() {
     let mut input = gilrs::Gilrs::new().unwrap();
 
     let mut cycles = 0u8;
+    
 
     while window.is_open() {
         let cycles_per_frame;
@@ -98,6 +100,10 @@ fn main() {
             cycles_this_instruction = cpu.execute(&mut mmu) as usize;
             cycles += cycles_this_instruction;
             mmu.tick_timer(cycles_this_instruction as u16);
+            mmu.tick(
+                cpu.speed == ClockSpeed::Double,
+                cycles_this_instruction as u16,
+            );
         }
         overflow_cycles = cycles - cycles_per_frame;
 

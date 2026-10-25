@@ -2,7 +2,7 @@
 
 use std::cmp::PartialEq;
 use std::thread::sleep;
-use crate::initialize::initializable;
+use crate::initialize::Initializable;
 use crate::mmu::MMU;
 use crate::mode::{ClockSpeed, HardwareMode};
 
@@ -612,6 +612,10 @@ impl Cpu{
         } else {
             mmu.rb(self.pc) as u16
         };
+        if mmu.cpu_external_stall > 0{
+            mmu.cpu_external_stall -= 4;
+            return 4
+        }
         if self.speed_change_timer > 0 {
            if self.speed == ClockSpeed::Double {
                self.speed_change_timer = self.speed_change_timer.wrapping_sub(2);
@@ -903,7 +907,6 @@ impl Cpu{
             },
             _ => unreachable!()
         };
-        // forgot in the past code
         match opcode{
             0x01 | 0x11 | 0x21 | 0x31 | 0x36 | 0xE0 | 0xF0 => {
                 cycles = 12
@@ -2009,7 +2012,7 @@ impl Cpu{
     }
 }
 
-impl initializable for Cpu{
+impl Initializable for Cpu{
     fn init(&mut self){
         if !self.has_bios{
             self.a = 0x01;
