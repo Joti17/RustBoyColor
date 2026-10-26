@@ -4,3 +4,4 @@
 dump*
 *.bin
 *.txt
+Cargo.lock
