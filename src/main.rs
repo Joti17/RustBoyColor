@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 use crate::initialize::Initializable;
 use crate::mmu::MMU;
-use minifb::{Window, WindowOptions};
+use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use rand::prelude::IndexedRandom;
 use crate::input::get_input;
 use crate::mode::ClockSpeed;
@@ -30,34 +30,9 @@ fn main() {
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/10-bit ops.gb", "");
     // let mut mmu = MMU::new(true, "roms/blargg/halt_bug.gb", "");
     // let mut mmu = MMU::new(true, "roms/blargg/instr_timing/instr_timing.gb", "");
-    // let mut mmu = MMU::new(true, "roms/LOZ.gb", "");
+    let mut mmu = MMU::new(true, "roms/LOZ.gb", "roms/gb_bios.bin");
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
 
-    let roms: Vec<_> = std::fs::read_dir("roms/blargg")
-        .unwrap()
-        .flat_map(|entry| {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walkdir::WalkDir::new(path)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "gb"))
-                    .map(|e| e.path().to_path_buf())
-                    .collect::<Vec<_>>()
-            } else if path.extension().is_some_and(|ext| ext == "gb") {
-                vec![path]
-            } else {
-                vec![]
-            }
-        })
-        .collect();
-
-    use rand::seq::SliceRandom;
-
-    let rom = roms.choose(&mut rand::rng()).expect("No GB ROMs found");
-    println!("Selected ROM: {}", rom.display());
-
-    let mut mmu = MMU::new(true, rom.to_str().unwrap(), "");
 
     mmu.init();
     let mut cpu = cpu::Cpu::new(true, false);
@@ -106,6 +81,10 @@ fn main() {
             );
         }
         overflow_cycles = cycles - cycles_per_frame;
+
+        if window.is_key_pressed(Key::Escape, KeyRepeat::No) {
+            mmu.ppu.dump_vram();
+        }
 
         if is_ppu_finished {
             window.update_with_buffer(buffer.as_slice(), WIDTH, HEIGHT).unwrap();

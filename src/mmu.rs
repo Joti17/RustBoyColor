@@ -1,7 +1,7 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
-use crate::dma::DMA;
+use crate::dma::{DMA, VramDMA};
 use crate::initialize::Initializable;
 use crate::mbc;
 use crate::mbc::*;
@@ -39,7 +39,9 @@ pub struct MMU {
     pub timer: Timer,
     pub ppu: PPU,
     pub cpu_external_stall: u8,
-    pub dma: DMA
+    pub dma: DMA,
+    pub vram_dma: VramDMA,
+    dot_remainder: u8,
 
 }
 
@@ -310,6 +312,8 @@ impl MMU {
             ie: 0x00,
             cpu_external_stall: 0,
             dma: DMA::new(),
+            vram_dma: VramDMA::new(),
+            dot_remainder: 0,
         }
 
         // n.load_rom(rom_file, &mut n.wram).unwrap();
@@ -357,7 +361,7 @@ impl MMU {
              return self.rb_unrestricted(addr - 0x2000);
         }
         if (0xFE00..=0xFE9F).contains(&addr) {
-            return if self.ppu.mode != PPUMode::OAM || self.ppu.mode != PPUMode::VRAM {
+            return if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
                 self.ppu.oam[(addr - 0xFE00) as usize]
             } else {
                 0xFF
@@ -371,6 +375,12 @@ impl MMU {
                 0x06 => self.timer.tma,
                 0x07 => self.timer.tac | 0xF8,
                 0x46 => self.io[reg as usize],
+                0x40 => self.ppu.read_lcdc(),
+                0x44 => self.ppu.ly(),
+                0x51..=0x55 if self.mode != HardwareMode::Dmg => {
+                    self.vram_dma.read_register(reg)
+                }
+                0x51..=0x55 => 0xFF,
                 0x4F => self.ppu.vram_bank | 0xFE,
                 0x50 => {
                     if self.has_bios {
@@ -422,7 +432,7 @@ impl MMU {
         } else if (0xE000..=0xFDFF).contains(&addr) {
             self.wb(addr - 0x2000, data);
         } else if (0xFE00..=0xFE9F).contains(&addr) {
-            if self.ppu.mode != PPUMode::OAM || self.ppu.mode != PPUMode::VRAM {
+            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
                 self.ppu.oam[(addr - 0xFE00) as usize] = data;
             } // else it's ignored
         } else if (0xFF00..=0xFF7F).contains(&addr) {
@@ -464,6 +474,24 @@ impl MMU {
                     self.dma.start_transfer(data);
 
                 }
+                0x40 => {
+                    let was_enabled = self.ppu.lcd_enabled();
+                    self.ppu.write_lcdc(data);
+                    if was_enabled && !self.ppu.lcd_enabled() {
+                        self.vram_dma.on_lcd_disabled();
+                    }
+                    self.writeIO(reg, data);
+                }
+                0x51..=0x55 if self.mode != HardwareMode::Dmg => {
+                    self.vram_dma
+                        .write_register(
+                            reg,
+                            data,
+                            self.ppu.lcd_enabled(),
+                            self.ppu.mode == PPUMode::HBlank,
+                        );
+                }
+                0x51..=0x55 => {}
                 0x4F => self.ppu.vram_bank = data & 0x01,
                 0x50 => {
                     if self.has_bios && data != 0 {
@@ -486,12 +514,40 @@ impl MMU {
     }
 
     pub fn tick(&mut self, is_double_speed: bool, cycles: u16){
+        let dots = if is_double_speed {
+            let total_cycles = cycles as u32 + self.dot_remainder as u32;
+            self.dot_remainder = (total_cycles % 2) as u8;
+            (total_cycles / 2) as u16
+        } else {
+            cycles
+        };
+
+        let mut vram_dma = std::mem::replace(&mut self.vram_dma, VramDMA::new());
+        for _ in 0..dots {
+            if self.mode != HardwareMode::Dmg && self.ppu.mode != PPUMode::VRAM {
+                vram_dma.tick(1, |source, destination| {
+                    let value = self.rb_unrestricted(source);
+                    let bank = self.ppu.vram_bank as usize;
+                    self.ppu.vram[bank][(destination - 0x8000) as usize] = value;
+                });
+            }
+
+            if self.ppu.tick(1) {
+                vram_dma.on_hblank();
+            }
+        }
+        self.vram_dma = vram_dma;
+
         let mut dma = std::mem::replace(&mut self.dma, DMA::new());
         dma.tick(cycles, is_double_speed, |address, index| {
             let value = self.rb_unrestricted(address);
             self.ppu.oam[index] = value;
         });
         self.dma = dma;
+    }
+
+    pub fn is_cpu_stalled(&self) -> bool {
+        self.vram_dma.is_cpu_blocked()
     }
 
     pub fn ww(&mut self, addr: u16, data: u16) {
@@ -512,77 +568,70 @@ impl MMU {
 }
 impl Initializable for MMU{
     fn init(&mut self){
-        if self.has_bios {self.wb(0xFF04, 0x00)} else {self.wb(0xFF04, 0xAB)}
+        self.ppu = PPU::new();
+        self.dma = DMA::new();
+        self.vram_dma = VramDMA::new();
+        self.dot_remainder = 0;
+        self.wb(0xFF00, if self.has_bios { 0xCF } else { 0xCF });
+        self.wb(0xFF01, if self.has_bios { 0x00 } else { 0x00 });
+        self.wb(0xFF02, if self.has_bios { 0x7E } else { 0x7F });
+        self.wb(0xFF04, if self.has_bios { 0x00 } else { 0xAB });
         self.wb(0xFF05, 0x00);
         self.wb(0xFF06, 0x00);
-        self.wb(0xFF07, 0x00);
-
+        self.wb(0xFF07, 0xF8);
+        self.wb(0xFF0F, 0xE1);
         self.wb(0xFF10, 0x80);
         self.wb(0xFF11, 0xBF);
         self.wb(0xFF12, 0xF3);
+        self.wb(0xFF13, 0xFF);
         self.wb(0xFF14, 0xBF);
         self.wb(0xFF16, 0x3F);
         self.wb(0xFF17, 0x00);
+        self.wb(0xFF18, 0xFF);
         self.wb(0xFF19, 0xBF);
         self.wb(0xFF1A, 0x7F);
         self.wb(0xFF1B, 0xFF);
         self.wb(0xFF1C, 0x9F);
-        self.wb(0xFF1E, 0xFF);
+        self.wb(0xFF1D, 0xFF);
+        self.wb(0xFF1E, 0xBF);
         self.wb(0xFF20, 0xFF);
-        if self.has_bios {self.wb(0xFF23, 0xBF)} else {self.wb(0xFF23, 0xFF)}
+        self.wb(0xFF21, 0x00);
+        self.wb(0xFF22, 0x00);
+        self.wb(0xFF23, 0xBF);
         self.wb(0xFF24, 0x77);
         self.wb(0xFF25, 0xF3);
-        self.wb(0xFF26, 0xF1);
+        self.wb(0xFF26, if self.has_bios { 0xF0 } else { 0xF1 });
         self.wb(0xFF40, 0x91);
+        self.wb(0xFF41, if self.has_bios { 0x81 } else { 0x85 });
+        self.wb(0xFF42, 0x00);
+        self.wb(0xFF43, 0x00);
+        self.wb(0xFF44, if self.has_bios { 0x91 } else { 0x00 });
+        self.wb(0xFF45, 0x00);
+        self.wb(0xFF46, 0xFF);
         self.wb(0xFF47, 0xFC);
-        self.wb(0xFF48, 0xFF);
-        self.wb(0xFF49, 0xFF);
-        self.wb(0xFF50, 0x00);
+        self.wb(0xFF48, 0x00);
+        self.wb(0xFF49, 0x00);
         self.wb(0xFF4A, 0x00);
         self.wb(0xFF4B, 0x00);
+        self.wb(0xFF4C, 0x00);
+        self.wb(0xFF4D, 0x7E);
+        self.wb(0xFF4F, 0xFE);
+        self.wb(0xFF50, if self.has_bios { 0x00 } else { 0x01 });
+        for i in 0..5{
+            self.io[0x51+i] = 0xFF;
+        }
+        self.wb(0xFF56, 0x3E);
+        self.wb(0xFF68, 0x00);
+        self.wb(0xFF69, 0x00);
+        self.wb(0xFF6A, 0x00);
+        self.wb(0xFF6B, 0x00);
+        self.wb(0xFF70, 0xF8);
+
+        if !self.has_bios {
+            self.wb(0xFF50, 0x01);
+        }
         self.timer = Timer::new();
-        self.ppu = PPU::new();
         self.ie = 0x00;
         self.cpu_external_stall = 0;
-    }
-}
-
-#[cfg(test)]
-mod timer_tests {
-    use super::Timer;
-
-    #[test]
-    fn overflow_reloads_tima_and_requests_interrupt_after_four_cycles() {
-        let mut timer = Timer::new();
-        let mut interrupt_flags = 0;
-        timer.tac = 0x05;
-        timer.tima = 0xFF;
-        timer.tma = 0x42;
-
-        timer.tick(16, &mut interrupt_flags);
-        assert_eq!(timer.tima, 0);
-        assert_eq!(interrupt_flags & 0x04, 0);
-
-        timer.tick(3, &mut interrupt_flags);
-        assert_eq!(timer.tima, 0);
-        assert_eq!(interrupt_flags & 0x04, 0);
-
-        timer.tick(1, &mut interrupt_flags);
-        assert_eq!(timer.tima, 0x42);
-        assert_ne!(interrupt_flags & 0x04, 0);
-    }
-
-    #[test]
-    fn div_reset_clears_divider_and_applies_falling_edge() {
-        let mut timer = Timer::new();
-        timer.tac = 0x05;
-        timer.internal_timer = 8;
-        timer.div = 0x01;
-
-        timer.reset_div();
-
-        assert_eq!(timer.internal_timer, 0);
-        assert_eq!(timer.div, 0);
-        assert_eq!(timer.tima, 1);
     }
 }

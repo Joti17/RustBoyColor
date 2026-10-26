@@ -115,13 +115,81 @@ impl PPU {
         }
     }
 
-    pub fn tick(&mut self, dots: u16){
+    pub fn lcd_enabled(&self) -> bool {
+        self.lcdc.LCDC & 0x80 != 0
+    }
 
+    pub fn ly(&self) -> u8 {
+        self.ly
+    }
+
+    pub fn read_lcdc(&self) -> u8 {
+        self.lcdc.LCDC
+    }
+
+    pub fn write_lcdc(&mut self, value: u8) {
+        let was_enabled = self.lcd_enabled();
+        self.lcdc.LCDC = value;
+        let is_enabled = self.lcd_enabled();
+
+        if was_enabled && !is_enabled {
+            self.ly = 0;
+            self.mode_clock = 0;
+            self.mode = PPUMode::HBlank;
+        } else if !was_enabled && is_enabled {
+            self.ly = 0;
+            self.mode_clock = 0;
+            self.mode = PPUMode::OAM;
+        }
+    }
+
+    pub fn tick(&mut self, dots: u16) -> bool {
+        if !self.lcd_enabled() {
+            return false;
+        }
+
+        let mut entered_hblank = false;
+        for _ in 0..dots {
+            self.mode_clock += 1;
+            match self.mode {
+                PPUMode::OAM if self.mode_clock == 80 => {
+                    self.mode = PPUMode::VRAM;
+                    self.mode_clock = 0;
+                }
+                PPUMode::VRAM if self.mode_clock == 172 => {
+                    self.mode = PPUMode::HBlank;
+                    self.mode_clock = 0;
+                    entered_hblank = true;
+                }
+                PPUMode::HBlank if self.mode_clock == 204 => {
+                    self.mode_clock = 0;
+                    if self.ly == 143 {
+                        self.ly = 144;
+                        self.mode = PPUMode::VBlank;
+                    } else {
+                        self.ly += 1;
+                        self.mode = PPUMode::OAM;
+                    }
+                }
+                PPUMode::VBlank if self.mode_clock == 456 => {
+                    self.mode_clock = 0;
+                    if self.ly == 153 {
+                        self.ly = 0;
+                        self.mode = PPUMode::OAM;
+                    } else {
+                        self.ly += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        entered_hblank
     }
 
     fn oam_to_screen_position(&mut self, oam_index: usize) -> (i16, i16) {
         let y = ((self.oam[oam_index] & 0xFF) as i16) - 16;
-        let x = ((self.oam[oam_index] >> 8) & 0xFF) as i16 - 8;
+        let x = ((self.oam[oam_index] as u16 >> 8) & 0xFF) as i16 - 8;
         (x, y)
     }
 
@@ -140,4 +208,20 @@ impl PPU {
 
         pixels
     }
+
+    pub fn dump_vram(&self) {
+        use std::fs;
+
+        for bank in 0..1 {
+            let path = format!("vram_bank_{bank}.bin");
+            fs::write(&path, &self.vram[bank][..0x1800]).unwrap();
+        }
+    }
+
+    /*
+    fn tile_pixels_to_color(&self, tile_index: usize, mut pixels: [[u8; 8]; 8]) -> [[u16; 8]; 8]{
+
+        pixels
+    }
+    */
 }

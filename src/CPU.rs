@@ -607,13 +607,11 @@ impl Cpu{
     }
     pub fn execute(&mut self, mmu: &mut MMU) -> u8 {
         self.last_instruction_length = 0;
-        let instr_opcode = if mmu.rb(self.pc) == 0xCB {
-            ((mmu.rb(self.pc) as u16) << 8) | (mmu.rb(self.pc + 1) as u16)
-        } else {
-            mmu.rb(self.pc) as u16
-        };
-        if mmu.cpu_external_stall > 0{
+        if mmu.cpu_external_stall > 0 {
             mmu.cpu_external_stall -= 4;
+            return 4
+        }
+        if mmu.is_cpu_stalled() {
             return 4
         }
         if self.speed_change_timer > 0 {
@@ -623,6 +621,11 @@ impl Cpu{
             self.speed_change_timer = self.speed_change_timer.wrapping_sub(4);
             return 4
         }
+        let instr_opcode = if mmu.rb(self.pc) == 0xCB {
+            ((mmu.rb(self.pc) as u16) << 8) | (mmu.rb(self.pc + 1) as u16)
+        } else {
+            mmu.rb(self.pc) as u16
+        };
         let instr = Instruction::new(instr_opcode);
         // println!("PC:{:4x}, Opcode: {:4x} {} {:2x}", self.pc, mmu.rw(self.pc), instr.mnemonic, instr.opcode);
         // sleep(core::time::Duration::from_millis(10));
