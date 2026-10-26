@@ -1,11 +1,12 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
-use crate::initialize::initializable;
+use crate::dma::{DMA, VramDMA};
+use crate::initialize::Initializable;
 use crate::mbc;
 use crate::mbc::*;
-use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, TAC_SPEED};
-
+use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, PPUMode, TAC_SPEED};
+use crate::ppu::PPU;
 
 const WRAM_OFFSET: usize = 0xC000;
 const WRAM_SIZE: usize = 0x8000;
@@ -28,14 +29,20 @@ pub struct MMU {
     current_wram_bank: usize,
 
     hram: [u8; HRAM_SIZE],
-    oam: [u8; OAM_SIZE],
     io: [u8; IO_SIZE],
+    ie: u8,
 
     mode: HardwareMode,
     cartridge: Cartridge,
-    mbc: Box<dyn mbc::MBC + 'static>,
+    mbc: Box<dyn MBC + 'static>,
     has_bios: bool,
     pub timer: Timer,
+    pub ppu: PPU,
+    pub cpu_external_stall: u8,
+    pub dma: DMA,
+    pub vram_dma: VramDMA,
+    dot_remainder: u8,
+
 }
 
 pub struct Timer {
@@ -87,29 +94,52 @@ impl Timer {
 
             self.div = (self.internal_timer >> 8) as u8;
 
-            let tac_bit = match self.tac & 0x3 {
-                0 => 9,
-                1 => 3,
-                2 => 5,
-                _ => 7,
-            };
-
-            let old_signal = self.tac & 0x4 != 0
-                && old_counter & (1 << tac_bit) != 0;
-
-            let new_signal = self.tac & 0x4 != 0
-                && self.internal_timer & (1 << tac_bit) != 0;
-
-            if old_signal && !new_signal && self.tima_reload_delay.is_none() {
-                let (value, overflow) = self.tima.overflowing_add(1);
-
-                if overflow {
-                    self.tima = 0;
-                    self.tima_reload_delay = Some(4);
-                } else {
-                    self.tima = value;
-                }
+            if self.timer_signal(old_counter) && !self.timer_signal(self.internal_timer) {
+                self.increment_tima();
             }
+        }
+    }
+
+    fn timer_signal(&self, counter: u16) -> bool {
+        if self.tac & 0x04 == 0 {
+            return false;
+        }
+
+        let bit = match self.tac & 0x03 {
+            0 => 9,
+            1 => 3,
+            2 => 5,
+            _ => 7,
+        };
+        counter & (1 << bit) != 0
+    }
+
+    fn increment_tima(&mut self) {
+        if self.tima_reload_delay.is_some() {
+            return;
+        }
+
+        let (value, overflow) = self.tima.overflowing_add(1);
+        self.tima = value;
+        if overflow {
+            self.tima_reload_delay = Some(4);
+        }
+    }
+
+    fn reset_div(&mut self) {
+        let timer_was_high = self.timer_signal(self.internal_timer);
+        self.internal_timer = 0;
+        self.div = 0;
+        if timer_was_high {
+            self.increment_tima();
+        }
+    }
+
+    fn write_tac(&mut self, data: u8) {
+        let old_signal = self.timer_signal(self.internal_timer);
+        self.tac = data & 0x07;
+        if old_signal && !self.timer_signal(self.internal_timer) {
+            self.increment_tima();
         }
     }
 }
@@ -138,7 +168,7 @@ impl Cartridge {
 
     fn load_rom(&mut self, file_name: &str) -> io::Result<()>{
         self.rom.clear();
-        let file = BufReader::new(File::open(file_name).unwrap());
+        let file = BufReader::new(File::open(file_name)?);
         let mut reader = BufReader::new(file);
 
         reader.read_to_end(&mut self.rom)?;
@@ -233,9 +263,6 @@ impl MMU {
         let mut wram= [0x00; WRAM_SIZE];
         random_array(&mut wram);
 
-        let mut oam = [0x00; OAM_SIZE];
-        random_array(&mut oam);
-
         let mut hram = [0x00; HRAM_SIZE];
         random_array(&mut hram);
 
@@ -276,12 +303,17 @@ impl MMU {
             current_wram_bank: 0,
             mode,
             cartridge,
-            oam,
             hram,
             io,
             mbc,
             has_bios,
             timer: Timer::new(),
+            ppu: PPU::new(),
+            ie: 0x00,
+            cpu_external_stall: 0,
+            dma: DMA::new(),
+            vram_dma: VramDMA::new(),
+            dot_remainder: 0,
         }
 
         // n.load_rom(rom_file, &mut n.wram).unwrap();
@@ -292,11 +324,26 @@ impl MMU {
     }
 
     pub fn rb(&self, addr: u16) -> u8 {
+        if self.dma.is_active()
+            && !(0xFF80..=0xFFFE).contains(&addr)
+            && addr != 0xFF46
+        {
+            return 0xFF;
+        }
+
+        self.rb_unrestricted(addr)
+    }
+
+    fn rb_unrestricted(&self, addr: u16) -> u8 {
         if addr < 0x8000 {
             return self.mbc.read_rom(addr);
         }
         if (0x8000..=0x9FFF).contains(&addr) {
-            println!("Tried to write to VRAM 0x{:x}", addr)
+            return if self.ppu.mode != PPUMode::VRAM {
+                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000]
+            } else {
+                0xFF
+            }
         }
         if (0xA000..=0xBFFF).contains(&addr) {
             return self.mbc.read_ram(addr);
@@ -311,27 +358,39 @@ impl MMU {
             return self.wram[offset];
         }
         if (0xE000..=0xFDFF).contains(&addr) {
-             return self.rb(addr - 0x2000);
+             return self.rb_unrestricted(addr - 0x2000);
         }
         if (0xFE00..=0xFE9F).contains(&addr) {
-            return self.oam[(addr - 0xFE00) as usize];
+            return if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
+                self.ppu.oam[(addr - 0xFE00) as usize]
+            } else {
+                0xFF
+            }
         }
         if (0xFF00..=0xFF7F).contains(&addr) {
             let reg = (addr - 0xFF00) as u8;
-            match reg {
-                0x04 => return self.timer.div,
-                0x05 => return self.timer.tima,
-                0x06 => return self.timer.tma | 0xF8,
-                0x07 => return self.timer.tac,
+            return match reg {
+                0x04 => self.timer.div,
+                0x05 => self.timer.tima,
+                0x06 => self.timer.tma,
+                0x07 => self.timer.tac | 0xF8,
+                0x46 => self.io[reg as usize],
+                0x40 => self.ppu.read_lcdc(),
+                0x44 => self.ppu.ly(),
+                0x51..=0x55 if self.mode != HardwareMode::Dmg => {
+                    self.vram_dma.read_register(reg)
+                }
+                0x51..=0x55 => 0xFF,
+                0x4F => self.ppu.vram_bank | 0xFE,
                 0x50 => {
-                    return if self.has_bios {
+                    if self.has_bios {
                         0xFF
                     } else {
                         self.io[reg as usize]
-                    };
+                    }
                 }
                 _ => {
-                    return self.io[reg as usize];
+                    self.io[reg as usize]
                 }
             }
         }
@@ -339,19 +398,26 @@ impl MMU {
             return self.hram[(addr - 0xFF80) as usize];
         }
         if addr == 0xFFFF {
-            // IE register is usually at the end of HRAM or handled separately
-            // In this project it seems it's in IO or HRAM? 
-            // In CPU.rs, IE is 0xFFFF.
+            return self.ie | 0xE0;
         }
 
         0xFF
     }
 
     pub fn wb(&mut self, addr: u16, data: u8) {
+        if self.dma.is_active()
+            && !(0xFF80..=0xFFFE).contains(&addr)
+            && addr != 0xFF46
+        {
+            return;
+        }
+
         if addr < 0x8000 {
             self.mbc.write_rom(addr, data);
         } else if (0x8000..=0x9FFF).contains(&addr) {
-            // VRAM missing?
+            if self.ppu.mode != PPUMode::VRAM{
+                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000] = data;
+            }
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.mbc.write_ram(addr, data);
         } else if (0xC000..=0xDFFF).contains(&addr) {
@@ -366,7 +432,9 @@ impl MMU {
         } else if (0xE000..=0xFDFF).contains(&addr) {
             self.wb(addr - 0x2000, data);
         } else if (0xFE00..=0xFE9F).contains(&addr) {
-            self.oam[(addr - 0xFE00) as usize] = data;
+            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
+                self.ppu.oam[(addr - 0xFE00) as usize] = data;
+            } // else it's ignored
         } else if (0xFF00..=0xFF7F).contains(&addr) {
             let reg = (addr - 0xFF00) as u8;
             match reg {
@@ -381,7 +449,7 @@ impl MMU {
                     }
                 }
                 0x04 => {
-                    self.timer.div = 0x00;
+                    self.timer.reset_div();
                 }
                 0x05 => {
                     if self.timer.tima_reload_delay.is_none() {
@@ -399,32 +467,32 @@ impl MMU {
                     }
                 }
                 0x07 => {
-                    let tac_bit = match self.timer.tac & 0x3 {
-                        0 => 9,
-                        1 => 3,
-                        2 => 5,
-                        _ => 7,
-                    };
-
-                    let old_signal = self.timer.tac & 0x4 != 0
-                        && self.timer.internal_timer & (1 << tac_bit) != 0;
-
-                    self.timer.tac = data & 0x07;
-
-                    let tac_bit = match self.timer.tac & 0x3 {
-                        0 => 9,
-                        1 => 3,
-                        2 => 5,
-                        _ => 7,
-                    };
-
-                    let new_signal = self.timer.tac & 0x4 != 0
-                        && self.timer.internal_timer & (1 << tac_bit) != 0;
-
-                    if old_signal && !new_signal {
-                        self.timer.tima = self.timer.tima.wrapping_add(1);
-                    }
+                    self.timer.write_tac(data);
                 }
+                0x46 => {
+                    self.writeIO(reg, data);
+                    self.dma.start_transfer(data);
+
+                }
+                0x40 => {
+                    let was_enabled = self.ppu.lcd_enabled();
+                    self.ppu.write_lcdc(data);
+                    if was_enabled && !self.ppu.lcd_enabled() {
+                        self.vram_dma.on_lcd_disabled();
+                    }
+                    self.writeIO(reg, data);
+                }
+                0x51..=0x55 if self.mode != HardwareMode::Dmg => {
+                    self.vram_dma
+                        .write_register(
+                            reg,
+                            data,
+                            self.ppu.lcd_enabled(),
+                            self.ppu.mode == PPUMode::HBlank,
+                        );
+                }
+                0x51..=0x55 => {}
+                0x4F => self.ppu.vram_bank = data & 0x01,
                 0x50 => {
                     if self.has_bios && data != 0 {
                         self.writeIO(reg, data);
@@ -441,8 +509,45 @@ impl MMU {
         } else if (0xFF80..=0xFFFE).contains(&addr) {
             self.hram[(addr - 0xFF80) as usize] = data;
         } else if addr == 0xFFFF {
-            // IE register
+            self.ie = data;
         }
+    }
+
+    pub fn tick(&mut self, is_double_speed: bool, cycles: u16){
+        let dots = if is_double_speed {
+            let total_cycles = cycles as u32 + self.dot_remainder as u32;
+            self.dot_remainder = (total_cycles % 2) as u8;
+            (total_cycles / 2) as u16
+        } else {
+            cycles
+        };
+
+        let mut vram_dma = std::mem::replace(&mut self.vram_dma, VramDMA::new());
+        for _ in 0..dots {
+            if self.mode != HardwareMode::Dmg && self.ppu.mode != PPUMode::VRAM {
+                vram_dma.tick(1, |source, destination| {
+                    let value = self.rb_unrestricted(source);
+                    let bank = self.ppu.vram_bank as usize;
+                    self.ppu.vram[bank][(destination - 0x8000) as usize] = value;
+                });
+            }
+
+            if self.ppu.tick(1) {
+                vram_dma.on_hblank();
+            }
+        }
+        self.vram_dma = vram_dma;
+
+        let mut dma = std::mem::replace(&mut self.dma, DMA::new());
+        dma.tick(cycles, is_double_speed, |address, index| {
+            let value = self.rb_unrestricted(address);
+            self.ppu.oam[index] = value;
+        });
+        self.dma = dma;
+    }
+
+    pub fn is_cpu_stalled(&self) -> bool {
+        self.vram_dma.is_cpu_blocked()
     }
 
     pub fn ww(&mut self, addr: u16, data: u16) {
@@ -461,36 +566,72 @@ impl MMU {
         }
     }
 }
-impl initializable for MMU{
+impl Initializable for MMU{
     fn init(&mut self){
-        if self.has_bios {self.wb(0xFF04, 0x00)} else {self.wb(0xFF04, 0xAB)}
+        self.ppu = PPU::new();
+        self.dma = DMA::new();
+        self.vram_dma = VramDMA::new();
+        self.dot_remainder = 0;
+        self.wb(0xFF00, if self.has_bios { 0xCF } else { 0xCF });
+        self.wb(0xFF01, if self.has_bios { 0x00 } else { 0x00 });
+        self.wb(0xFF02, if self.has_bios { 0x7E } else { 0x7F });
+        self.wb(0xFF04, if self.has_bios { 0x00 } else { 0xAB });
         self.wb(0xFF05, 0x00);
         self.wb(0xFF06, 0x00);
-        self.wb(0xFF07, 0x00);
-
+        self.wb(0xFF07, 0xF8);
+        self.wb(0xFF0F, 0xE1);
         self.wb(0xFF10, 0x80);
         self.wb(0xFF11, 0xBF);
         self.wb(0xFF12, 0xF3);
+        self.wb(0xFF13, 0xFF);
         self.wb(0xFF14, 0xBF);
         self.wb(0xFF16, 0x3F);
         self.wb(0xFF17, 0x00);
+        self.wb(0xFF18, 0xFF);
         self.wb(0xFF19, 0xBF);
         self.wb(0xFF1A, 0x7F);
         self.wb(0xFF1B, 0xFF);
         self.wb(0xFF1C, 0x9F);
-        self.wb(0xFF1E, 0xFF);
+        self.wb(0xFF1D, 0xFF);
+        self.wb(0xFF1E, 0xBF);
         self.wb(0xFF20, 0xFF);
-        if self.has_bios {self.wb(0xFF23, 0xBF)} else {self.wb(0xFF23, 0xFF)}
+        self.wb(0xFF21, 0x00);
+        self.wb(0xFF22, 0x00);
+        self.wb(0xFF23, 0xBF);
         self.wb(0xFF24, 0x77);
         self.wb(0xFF25, 0xF3);
-        self.wb(0xFF26, 0xF1);
+        self.wb(0xFF26, if self.has_bios { 0xF0 } else { 0xF1 });
         self.wb(0xFF40, 0x91);
+        self.wb(0xFF41, if self.has_bios { 0x81 } else { 0x85 });
+        self.wb(0xFF42, 0x00);
+        self.wb(0xFF43, 0x00);
+        self.wb(0xFF44, if self.has_bios { 0x91 } else { 0x00 });
+        self.wb(0xFF45, 0x00);
+        self.wb(0xFF46, 0xFF);
         self.wb(0xFF47, 0xFC);
-        self.wb(0xFF48, 0xFF);
-        self.wb(0xFF49, 0xFF);
-        self.wb(0xFF50, 0x00);
+        self.wb(0xFF48, 0x00);
+        self.wb(0xFF49, 0x00);
         self.wb(0xFF4A, 0x00);
         self.wb(0xFF4B, 0x00);
+        self.wb(0xFF4C, 0x00);
+        self.wb(0xFF4D, 0x7E);
+        self.wb(0xFF4F, 0xFE);
+        self.wb(0xFF50, if self.has_bios { 0x00 } else { 0x01 });
+        for i in 0..5{
+            self.io[0x51+i] = 0xFF;
+        }
+        self.wb(0xFF56, 0x3E);
+        self.wb(0xFF68, 0x00);
+        self.wb(0xFF69, 0x00);
+        self.wb(0xFF6A, 0x00);
+        self.wb(0xFF6B, 0x00);
+        self.wb(0xFF70, 0xF8);
+
+        if !self.has_bios {
+            self.wb(0xFF50, 0x01);
+        }
         self.timer = Timer::new();
+        self.ie = 0x00;
+        self.cpu_external_stall = 0;
     }
 }

@@ -2,7 +2,7 @@
 
 use std::cmp::PartialEq;
 use std::thread::sleep;
-use crate::initialize::initializable;
+use crate::initialize::Initializable;
 use crate::mmu::MMU;
 use crate::mode::{ClockSpeed, HardwareMode};
 
@@ -468,7 +468,7 @@ pub struct Cpu {
     halt: bool,
     stopped: bool,
     mode: HardwareMode,
-    speed: ClockSpeed,
+    pub speed: ClockSpeed,
     pub speed_change_timer: u16,
     halt_bug: bool,
 }
@@ -607,11 +607,13 @@ impl Cpu{
     }
     pub fn execute(&mut self, mmu: &mut MMU) -> u8 {
         self.last_instruction_length = 0;
-        let instr_opcode = if mmu.rb(self.pc) == 0xCB {
-            ((mmu.rb(self.pc) as u16) << 8) | (mmu.rb(self.pc + 1) as u16)
-        } else {
-            mmu.rb(self.pc) as u16
-        };
+        if mmu.cpu_external_stall > 0 {
+            mmu.cpu_external_stall -= 4;
+            return 4
+        }
+        if mmu.is_cpu_stalled() {
+            return 4
+        }
         if self.speed_change_timer > 0 {
            if self.speed == ClockSpeed::Double {
                self.speed_change_timer = self.speed_change_timer.wrapping_sub(2);
@@ -619,17 +621,29 @@ impl Cpu{
             self.speed_change_timer = self.speed_change_timer.wrapping_sub(4);
             return 4
         }
+        let instr_opcode = if mmu.rb(self.pc) == 0xCB {
+            ((mmu.rb(self.pc) as u16) << 8) | (mmu.rb(self.pc + 1) as u16)
+        } else {
+            mmu.rb(self.pc) as u16
+        };
         let instr = Instruction::new(instr_opcode);
         // println!("PC:{:4x}, Opcode: {:4x} {} {:2x}", self.pc, mmu.rw(self.pc), instr.mnemonic, instr.opcode);
         // sleep(core::time::Duration::from_millis(10));
         let mut cycles = 67;
+
+        let interrupt_cycles = self.service_interrupt(mmu);
+        if interrupt_cycles != 0 {
+            return interrupt_cycles;
+        }
+        if self.halt {
+            return 4;
+        }
 
         if self.speed_change_timer > 0{
             self.speed_change_timer -= 4;
             return 4
         }
 
-        self.service_interrupt(mmu);
         self.last_instruction_length = instr.length as usize;
 
         if instr_opcode & 0xFF00 == 0xCB00 {
@@ -896,7 +910,6 @@ impl Cpu{
             },
             _ => unreachable!()
         };
-        // forgot in the past code
         match opcode{
             0x01 | 0x11 | 0x21 | 0x31 | 0x36 | 0xE0 | 0xF0 => {
                 cycles = 12
@@ -2002,7 +2015,7 @@ impl Cpu{
     }
 }
 
-impl initializable for Cpu{
+impl Initializable for Cpu{
     fn init(&mut self){
         if !self.has_bios{
             self.a = 0x01;

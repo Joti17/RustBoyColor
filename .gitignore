@@ -1,2 +1,6 @@
 /target
 /roms
+/.idea
+dump*
+*.bin
+*.txt

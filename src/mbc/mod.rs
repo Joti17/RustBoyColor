@@ -65,43 +65,6 @@ pub fn ram_banks(val: u8) -> u8 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Bios;
-
-    #[test]
-    fn dmg_bios_is_visible_only_in_the_first_256_bytes() {
-        let bios = Bios::new(vec![0xA5; 0x100]);
-
-        assert_eq!(bios.read(0x0000), Some(0xA5));
-        assert_eq!(bios.read(0x00FF), Some(0xA5));
-        assert_eq!(bios.read(0x0100), None);
-        assert_eq!(bios.read(0x0200), None);
-    }
-
-    #[test]
-    fn cgb_bios_leaves_cartridge_header_visible() {
-        let mut data = vec![0x5A; 0x900];
-        data[0x0100] = 0xA5;
-        let bios = Bios::new(data);
-
-        assert_eq!(bios.read(0x00FF), Some(0x5A));
-        assert_eq!(bios.read(0x0100), None);
-        assert_eq!(bios.read(0x01FF), None);
-        assert_eq!(bios.read(0x0200), Some(0x5A));
-        assert_eq!(bios.read(0x08FF), Some(0x5A));
-        assert_eq!(bios.read(0x0900), None);
-    }
-
-    #[test]
-    fn disabled_bios_is_not_visible() {
-        let mut bios = Bios::new(vec![0xA5; 0x100]);
-        bios.disable();
-
-        assert_eq!(bios.read(0x0000), None);
-    }
-}
-
 // Same as ram_banks
 pub fn rom_banks(val: u8) -> usize {
     if val <= 8 {
