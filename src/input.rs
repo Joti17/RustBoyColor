@@ -103,10 +103,25 @@ pub fn get_input_gamepad(joyp: u8, gilrs: &mut Gilrs) -> u8{
     button_state
 }
 
-fn get_bit(data: u8, bit: u8) -> bool {
+pub fn get_bit(data: u8, bit: u8) -> bool {
+    if bit > 7 {
+        panic!("Can't read bit: {}", bit);
+    }
     (data & (1 << bit)) != 0
 }
 
-fn clear_bit(data: u8, bit: u8) -> u8 {
+pub fn clear_bit(data: u8, bit: u8) -> u8
+{
+    if bit > 7 {
+        panic!("Can't clear bit: {}", bit);
+    }
     data & !(1 << bit)
+}
+
+pub fn set_bit(data: u8, bit: u8) -> u8
+{
+    if bit > 7 {
+        panic!("Can't set bit: {}", bit);
+    }
+    data | (1 << bit)
 }
