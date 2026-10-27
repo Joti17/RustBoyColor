@@ -241,8 +241,8 @@ fn random_array(input: &mut [u8]) {
 fn random_array(input: &mut [u8]) {
     random(input);
 }
-fn random(input: &mut [u8]) {
-    let mut seed: u32 = 0x12345678;
+pub(crate) fn random(input: &mut [u8]) {
+    let mut seed: u32 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
     for byte in input.iter_mut() {
         seed ^= seed << 13;
         seed ^= seed >> 17;

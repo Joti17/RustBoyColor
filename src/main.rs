@@ -15,6 +15,7 @@ mod initialize;
 mod ppu;
 mod input;
 mod dma;
+mod stub_ppu;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
@@ -30,8 +31,13 @@ fn main() {
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/10-bit ops.gb", "");
     // let mut mmu = MMU::new(true, "roms/blargg/halt_bug.gb", "");
     // let mut mmu = MMU::new(true, "roms/blargg/instr_timing/instr_timing.gb", "");
-    let mut mmu = MMU::new(true, "roms/LOZ.gb", "roms/gb_bios.bin");
-    // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
+    // let mut mmu = MMU::new(true, "roms/LOZ.gb", "roms/gb_bios.bin");
+    /*use stub_ppu;
+    test!(just_render);
+    */
+    return;
+
+    let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
 
 
     mmu.init();
