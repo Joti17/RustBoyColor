@@ -414,7 +414,7 @@ impl PPU{
 
 
 
-    fn rgb555_to_xrgb8888(rgb555: u16) -> u32 {
+    pub fn rgb555_to_xrgb8888(rgb555: u16) -> u32 {
         let r5 = (rgb555 >> 10) & 0x1F;
         let g5 = (rgb555 >> 5) & 0x1F;
         let b5 = rgb555 & 0x1F;

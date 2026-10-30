@@ -32,10 +32,8 @@ fn main() {
     // let mut mmu = MMU::new(true, "roms/blargg/halt_bug.gb", "");
     // let mut mmu = MMU::new(true, "roms/blargg/instr_timing/instr_timing.gb", "");
     // let mut mmu = MMU::new(true, "roms/LOZ.gb", "roms/gb_bios.bin");
-    /*use stub_ppu;
-    test!(just_render);
-    */
-    return;
+
+
 
     let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
 
@@ -85,6 +83,14 @@ fn main() {
                 cpu.speed == ClockSpeed::Double,
                 cycles_this_instruction as u16,
             );
+            let dots = if cpu.speed != ClockSpeed::Double {
+                cycles_this_instruction / 2
+            } else {
+                cycles_this_instruction
+            };
+            if mmu.tick_ppu(dots as u16) {
+                mmu.vram_dma.on_hblank();
+            }
         }
         overflow_cycles = cycles - cycles_per_frame;
 
