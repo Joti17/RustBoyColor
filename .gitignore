@@ -5,3 +5,4 @@ dump*
 *.bin
 *.txt
 Cargo.lock
+!/ppu_test_data/*

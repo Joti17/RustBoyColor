@@ -9,3 +9,4 @@ minifb = "0.29.0"
 gilrs = "0.11.2"
 walkdir = "2.5.0"
 rand = "0.10.3"
+bytemuck = { version = "1.25.2", features = ["derive"] }

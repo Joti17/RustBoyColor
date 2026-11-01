@@ -1,0 +1,73 @@
+{
+  "registers": {
+    "LCDC": "0x91",
+    "SCY": "0x00",
+    "SCX": "0x00",
+    "LY": "0x00",
+    "LYC": "0x00",
+    "BGP": "0xE4",
+    "OBP0": "0xE4",
+    "OBP1": "0x1B",
+    "WY": "0x00",
+    "WX": "0x07",
+    "VBK": "0x00",
+    "BCPS": "0x80",
+    "OCPS": "0x80"
+  },
+  "lcdc_bits": {
+    "7": "LCD enable",
+    "6": "Window tile map: 0=0x9800, 1=0x9C00",
+    "5": "Window enable",
+    "4": "Tile data addressing: 1=unsigned at 0x8000, 0=signed around 0x9000",
+    "3": "BG tile map: 0=0x9800, 1=0x9C00",
+    "2": "Sprite size: 0=8x8, 1=8x16",
+    "1": "Sprites enable",
+    "0": "DMG BG/window enable"
+  },
+  "presets": {
+    "dmg_bg_basic": {
+      "LCDC": "0x91",
+      "SCX": "0x00",
+      "SCY": "0x00",
+      "BGP": "0xE4",
+      "OBP0": "0xE4",
+      "OBP1": "0x1B"
+    },
+    "dmg_bg_and_sprites": {
+      "LCDC": "0x93",
+      "SCX": "0x00",
+      "SCY": "0x00",
+      "BGP": "0xE4",
+      "OBP0": "0xE4",
+      "OBP1": "0x1B"
+    },
+    "dmg_window": {
+      "LCDC": "0xF1",
+      "SCX": "0x00",
+      "SCY": "0x00",
+      "BGP": "0xE4",
+      "WY": "0x20",
+      "WX": "0x47"
+    },
+    "dmg_signed_tile_data": {
+      "LCDC": "0x81",
+      "SCX": "0x00",
+      "SCY": "0x00",
+      "BGP": "0xE4"
+    },
+    "dmg_8x16_sprites": {
+      "LCDC": "0x97",
+      "SCX": "0x00",
+      "SCY": "0x00",
+      "BGP": "0xE4",
+      "OBP0": "0xE4",
+      "OBP1": "0x1B"
+    },
+    "scroll_test": {
+      "LCDC": "0x91",
+      "SCX": "0x13",
+      "SCY": "0x0B",
+      "BGP": "0xE4"
+    }
+  }
+}
