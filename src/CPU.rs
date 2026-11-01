@@ -17,7 +17,28 @@ pub struct Instruction{
     cycles: u8,         // using M-Cycles
 }
 
+/// for my performance hungry vertical range function before
+struct VerticalRangeIter {
+    current: u16,
+    stop: u16,
+}
+
+impl Iterator for VerticalRangeIter {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current > self.stop {
+            return None;
+        }
+        let val = self.current as u8;
+        self.current += 0x10;
+        Some(val)
+    }
+}
+
 impl Instruction{
+    #[deprecated]
     pub fn new(opcode: u16) -> Self{
         let mut mnemonic;
         let mut length: u8 = 1;
@@ -392,6 +413,35 @@ impl Instruction{
 
     }
 
+    pub fn length_of(opcode: u16) -> u8 {
+        if (opcode & 0xFF00) >> 8 == 0xCB {
+            2
+        } else {
+            match (opcode & 0xFF) as u8 {
+                0x01 | 0x11 | 0x21 | 0x31 |
+                0x08 |
+                0xC2 | 0xD2 |
+                0xC3 |
+                0xC4 | 0xD4 |
+                0xCA | 0xDA | 0xCC | 0xDC |
+                0xCD |
+                0xEA | 0xFA => 3,
+
+                0x06 | 0x16 | 0x26 | 0x36 |
+                0x0E | 0x1E | 0x2E | 0x3E |
+                0x10 |
+                0x18 | 0x28 | 0x38 |
+                0x20 | 0x30 |
+                0xC6 | 0xD6 | 0xE6 | 0xF6 | 0xCE | 0xDE | 0xEE | 0xFE |
+                0xE0 | 0xF0 |
+                0xE8 |
+                0xF8 => 2,
+
+                _ => 1,
+            }
+        }
+    }
+
     fn register_pair_index(start: u8, n: u8) -> u8 {
         ((n - start) & 0xF0) >> 4
     }
@@ -603,7 +653,10 @@ impl Cpu{
 
 
     fn vertical_range(start: u8, stop: u8) -> impl Iterator<Item = u8> {
-        (start..=stop).step_by(0x10)
+        VerticalRangeIter {
+            current: start as u16,
+            stop: stop as u16,
+        }
     }
     pub fn execute(&mut self, mmu: &mut MMU) -> u8 {
         self.last_instruction_length = 0;
@@ -626,7 +679,7 @@ impl Cpu{
         } else {
             mmu.rb(self.pc) as u16
         };
-        let instr = Instruction::new(instr_opcode);
+        // let instr = Instruction::new(instr_opcode);
         // println!("PC:{:4x}, Opcode: {:4x} {} {:2x}", self.pc, mmu.rw(self.pc), instr.mnemonic, instr.opcode);
         // sleep(core::time::Duration::from_millis(10));
         let mut cycles = 67;
@@ -644,7 +697,7 @@ impl Cpu{
             return 4
         }
 
-        self.last_instruction_length = instr.length as usize;
+        self.last_instruction_length = Instruction::length_of(instr_opcode) as usize;
 
         if instr_opcode & 0xFF00 == 0xCB00 {
             match instr_opcode as u8 {
@@ -746,8 +799,8 @@ impl Cpu{
     }
 
     fn service_interrupt(&mut self, mmu: &mut MMU) -> u8{
-        let interrupt_flag = mmu.rb(IF) & 0x1F;
-        let interrupt_enabled = mmu.rb(IE);
+        let interrupt_flag = mmu.read_io(IF) & 0x1F;
+        let interrupt_enabled = mmu.read_io(IE);
 
         let fired = interrupt_flag & interrupt_enabled;
 
@@ -768,7 +821,7 @@ impl Cpu{
 
         for i in 0..5{
             if fired & (1 << i) > 0{
-                mmu.wb(IF, mmu.rb(IF) & !(1 << i));
+                mmu.wb(IF, interrupt_flag & !(1 << i));
 
                 self.push_stack(self.pc, mmu);
 
@@ -833,7 +886,7 @@ impl Cpu{
             0x21 => self.set_HL(self.d16(mmu)),
             0x22 => {
                 mmu.wb(self.HL(), self.a);
-                self.set_HL(self.HL()+1)
+                self.set_HL(self.HL().wrapping_add(1))
             },
             0x26 => self.h = self.d8(mmu),
             0x2A => {
