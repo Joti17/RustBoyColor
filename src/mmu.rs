@@ -45,7 +45,7 @@ pub struct MMU {
     pub ppu: PPU,
     pub cpu_external_stall: u8,
     pub dma: DMA,
-    pub vram_dma: VramDMA,
+    pub vram_dma: Option<VramDMA>,
     dot_remainder: u8,
     pub save_file: Option<String>
 
@@ -280,7 +280,7 @@ impl MMU {
         cartridge.parse_header(&mut io, &mut mode);
         // if bios != ""
         let mut mbc: Box<dyn MBC> = if has_bios {
-            let bios = std::fs::read(bios).unwrap();
+            let bios = fs::read(bios).unwrap();
             match cartridge.cartridge_type{
                 0 => Box::new(mbc0::MBC0::with_bios(cartridge.rom.clone(), bios)),
                 0x01..=0x03 => Box::new(mbc1::MBC1::with_bios(cartridge.rom.clone(), bios)),
@@ -329,7 +329,7 @@ impl MMU {
             ie: 0x00,
             cpu_external_stall: 0,
             dma: DMA::new(),
-            vram_dma: VramDMA::new(),
+            vram_dma: VramDMA::new().into(),
             dot_remainder: 0,
             save_file,
         }
@@ -355,147 +355,66 @@ impl MMU {
         self.rb_unrestricted(addr)
     }
 
-    fn rb_unrestricted(&self, addr: u16) -> u8 {
-        if addr < 0x8000 {
-            return self.mbc.read_rom(addr);
-        }
-        if (0x8000..=0x9FFF).contains(&addr) {
-            return if self.ppu.mode != PPUMode::Drawing {
-                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000]
-            } else {
-                0xFF
-            }
-        }
-        if (0xA000..=0xBFFF).contains(&addr) {
-            return self.mbc.read_ram(addr);
-        }
-        if (0xC000..=0xDFFF).contains(&addr) {
-            let offset = addr as usize - 0xC000;
-            if self.mode == HardwareMode::Cgb {
-                let bank = if offset < 0x1000 { 0 } else { self.current_wram_bank.max(1) };
-                let bank_offset = if offset < 0x1000 { offset } else { (offset - 0x1000) + bank * 0x1000 };
-                return self.wram[bank_offset];
-            }
-            return self.wram[offset];
-        }
-        if (0xE000..=0xFDFF).contains(&addr) {
-             return self.rb_unrestricted(addr - 0x2000);
-        }
-        if (0xFE00..=0xFE9F).contains(&addr) {
-            return if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
-                self.ppu.oam[(addr - 0xFE00) as usize]
-            } else {
-                0xFF
-            }
-        }
-        if (0xFF00..=0xFF7F).contains(&addr) {
-            let reg = (addr - 0xFF00) as u8;
-            return match reg {
-                0x04 => self.timer.div,
-                0x05 => self.timer.tima,
-                0x06 => self.timer.tma,
-                0x07 => self.timer.tac | 0xF8,
-                0x0F => self.io[reg as usize] | 0xE0,
-                0x46 => self.io[reg as usize],
-                0x40 => self.ppu.read_lcdc(),
-                0x41 => self.ppu.get_stat(),
-                0x42 => self.ppu.scy,
-                0x43 => self.ppu.scx,
-                0x44 => self.ppu.ly,
-                0x45 => self.ppu.lyc,
-                0x47 => self.ppu.bgp,
-                0x48 => self.ppu.obp0,
-                0x49 => self.ppu.obp1,
-                0x4A => self.ppu.wy,
-                0x4B => self.ppu.wx,
-                0x51..=0x55 if self.mode != HardwareMode::Dmg => {
-                    self.vram_dma.read_register(reg)
-                }
-                0x51..=0x55 => 0xFF,
-                0x4F => self.ppu.vram_bank | 0xFE,
-                0x50 => {
-                    if self.has_bios {
-                        0xFF
-                    } else {
+    #[inline(always)]
+    /// only use for raw IO registers
+    pub fn read_io(&self, addr: u16) -> u8 {
+        match addr {
+            0xFF00..=0xFF7F => {
+                let reg = (addr - 0xFF00) as u8;
+                match reg {
+                    0x04 => self.timer.div,
+                    0x05 => self.timer.tima,
+                    0x06 => self.timer.tma,
+                    0x07 => self.timer.tac | 0xF8,
+                    0x0F => self.io[reg as usize] | 0xE0,
+                    0x46 => self.io[reg as usize],
+                    0x40 => self.ppu.read_lcdc(),
+                    0x41 => self.ppu.get_stat(),
+                    0x42 => self.ppu.scy,
+                    0x43 => self.ppu.scx,
+                    0x44 => self.ppu.ly,
+                    0x45 => self.ppu.lyc,
+                    0x47 => self.ppu.bgp,
+                    0x48 => self.ppu.obp0,
+                    0x49 => self.ppu.obp1,
+                    0x4A => self.ppu.wy,
+                    0x4B => self.ppu.wx,
+                    0x51..=0x55 if self.mode != HardwareMode::Dmg => {
+                        self.vram_dma.as_ref().unwrap().read_register(reg)
+                    }
+                    0x51..=0x55 => 0xFF,
+                    0x4F => self.ppu.vram_bank | 0xFE,
+                    0x50 => {
+                        if self.has_bios {
+                            0xFF
+                        } else {
+                            self.io[reg as usize]
+                        }
+                    }
+                    0x68 if self.mode != HardwareMode::Dmg => self.ppu.read_bcps(),
+                    0x69 if self.mode != HardwareMode::Dmg => {
+                        if self.ppu.mode != PPUMode::Drawing { self.ppu.read_bcpd() } else { 0xFF }
+                    }
+                    0x6A if self.mode != HardwareMode::Dmg => self.ppu.read_ocps(),
+                    0x6B if self.mode != HardwareMode::Dmg => {
+                        if self.ppu.mode != PPUMode::Drawing { self.ppu.read_ocpd() } else { 0xFF }
+                    }
+                    0x68..=0x6B => 0xFF,
+                    0x6C if self.mode != HardwareMode::Dmg => self.ppu.read_opri(),
+                    0x6C => 0xFF,
+                    _ => {
                         self.io[reg as usize]
                     }
                 }
-                0x68 if self.mode != HardwareMode::Dmg => self.ppu.read_bcps(),
-                0x69 if self.mode != HardwareMode::Dmg => {
-                    if self.ppu.mode != PPUMode::Drawing { self.ppu.read_bcpd() } else { 0xFF }
-                }
-                0x6A if self.mode != HardwareMode::Dmg => self.ppu.read_ocps(),
-                0x6B if self.mode != HardwareMode::Dmg => {
-                    if self.ppu.mode != PPUMode::Drawing { self.ppu.read_ocpd() } else { 0xFF }
-                }
-                0x68..=0x6B => 0xFF,
-                0x6C if self.mode != HardwareMode::Dmg => self.ppu.read_opri(),
-                0x6C => 0xFF,
-                _ => {
-                    self.io[reg as usize]
-                }
             }
+            0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
+            0xFFFF => self.ie | 0xE0,
+            _ => panic!("Invalid IO register address: 0x{:04X}", addr)
         }
-        if (0xFF80..=0xFFFE).contains(&addr) {
-            return self.hram[(addr - 0xFF80) as usize];
-        }
-        if addr == 0xFFFF {
-            return self.ie | 0xE0;
-        }
-
-        0xFF
     }
 
-    pub fn save(&mut self){
-        if let Some(save_file) = &self.save_file {
-            if self.mbc.is_battery_backed() && self.mbc.check_and_reset_ram_updated(){
-                println!("Saving!");
-                fs::write(save_file, self.mbc.dump_ram()).unwrap();
-            }
-        }
-    }
-    pub fn trigger_interrupt(&mut self, interrupt: Interrupt) {
-        self.io[0x0F] |= interrupt as u8;
-    }
-
-    pub fn tick_ppu(&mut self, dots: u16) -> bool{
-        let res = self.ppu.tick(dots);
-        self.wb(IF, self.rb(IF) | res.interrupts);
-        res.hblank
-    }
-
-    pub fn wb(&mut self, addr: u16, data: u8) {
-        if self.dma.is_active()
-            && !(0xFF80..=0xFFFE).contains(&addr)
-            && addr != 0xFF46
-        {
-            return;
-        }
-
-        if addr < 0x8000 {
-            self.mbc.write_rom(addr, data);
-        } else if (0x8000..=0x9FFF).contains(&addr) {
-            if self.ppu.mode != PPUMode::Drawing {
-                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000] = data;
-            }
-        } else if (0xA000..=0xBFFF).contains(&addr) {
-            self.mbc.write_ram(addr, data);
-        } else if (0xC000..=0xDFFF).contains(&addr) {
-            let offset = addr as usize - 0xC000;
-            if self.mode == HardwareMode::Cgb {
-                let bank = if offset < 0x1000 { 0 } else { self.current_wram_bank.max(1) };
-                let bank_offset = if offset < 0x1000 { offset } else { (offset - 0x1000) + bank * 0x1000 };
-                self.wram[bank_offset] = data;
-            } else {
-                self.wram[offset] = data;
-            }
-        } else if (0xE000..=0xFDFF).contains(&addr) {
-            self.wb(addr - 0x2000, data);
-        } else if (0xFE00..=0xFE9F).contains(&addr) {
-            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
-                self.ppu.oam[(addr - 0xFE00) as usize] = data;
-            } // else it's ignored
-        } else if (0xFF00..=0xFF7F).contains(&addr) {
+    pub fn write_io(&mut self, addr: u16, data: u8){
+        if (0xFF00..=0xFF7F).contains(&addr) {
             let reg = (addr - 0xFF00) as u8;
             match reg {
                 0x02 => {
@@ -538,7 +457,7 @@ impl MMU {
                     let was_enabled = self.ppu.lcd_enabled();
                     self.ppu.write_lcdc(data);
                     if was_enabled && !self.ppu.lcd_enabled() {
-                        self.vram_dma.on_lcd_disabled();
+                        self.vram_dma.as_mut().unwrap().on_lcd_disabled();
                     }
                     self.writeIO(reg, data);
                 }
@@ -553,7 +472,7 @@ impl MMU {
                 0x4A => self.ppu.wy = data,
                 0x4B => self.ppu.wx = data,
                 0x51..=0x55 if self.mode != HardwareMode::Dmg => {
-                    self.vram_dma
+                    self.vram_dma.as_mut().unwrap()
                         .write_register(
                             reg,
                             data,
@@ -590,6 +509,99 @@ impl MMU {
             self.hram[(addr - 0xFF80) as usize] = data;
         } else if addr == 0xFFFF {
             self.ie = data;
+        } else {
+            println!("MMU: write to unmapped address: {:04X}", addr);
+        }
+    }
+
+    fn rb_unrestricted(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x7FFF => self.mbc.read_rom(addr),
+            0x8000..=0x9FFF => {
+                if self.ppu.mode != PPUMode::Drawing {
+                    self.ppu.vram[self.ppu.vram_bank as usize][(addr - 0x8000) as usize]
+                } else {
+                    0xFF
+                }
+            }
+            0xA000..=0xBFFF => self.mbc.read_ram(addr),
+            0xC000..=0xDFFF => {
+                let offset = addr as usize - 0xC000;
+                if self.mode == HardwareMode::Cgb {
+                    let bank = if offset < 0x1000 { 0 } else { self.current_wram_bank.max(1) };
+                    let bank_offset = if offset < 0x1000 { offset } else { (offset - 0x1000) + bank * 0x1000 };
+                    return self.wram[bank_offset];
+                }
+                self.wram[offset]
+            }
+            0xE000..=0xFDFF => self.rb_unrestricted(addr - 0x2000),
+            0xFE00..=0xFE9F => {
+                if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
+                    self.ppu.oam[(addr - 0xFE00) as usize]
+                } else {
+                    0xFF
+                }
+            }
+            0xFF00..=0xFFFF => {
+                self.read_io(addr)
+            }
+            _ => 0xFF
+        }
+    }
+
+    pub fn save(&mut self){
+        if let Some(save_file) = &self.save_file {
+            if self.mbc.is_battery_backed() {
+                println!("Saving!");
+                fs::write(save_file, self.mbc.dump_ram()).unwrap();
+            }
+        }
+    }
+    pub fn trigger_interrupt(&mut self, interrupt: Interrupt) {
+        self.io[0x0F] |= interrupt as u8;
+    }
+
+    pub fn tick_ppu(&mut self, dots: u16) -> bool{
+        let res = self.ppu.tick(dots);
+        if res.interrupts != 0 {
+            self.write_io(IF, self.read_io(IF) | res.interrupts);
+        }
+        res.hblank
+    }
+
+    pub fn wb(&mut self, addr: u16, data: u8) {
+        if self.dma.is_active()
+            && !(0xFF80..=0xFFFE).contains(&addr)
+            && addr != 0xFF46
+        {
+            return;
+        }
+
+        if addr < 0x8000 {
+            self.mbc.write_rom(addr, data);
+        } else if (0x8000..=0x9FFF).contains(&addr) {
+            if self.ppu.mode != PPUMode::Drawing {
+                self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000] = data;
+            }
+        } else if (0xA000..=0xBFFF).contains(&addr) {
+            self.mbc.write_ram(addr, data);
+        } else if (0xC000..=0xDFFF).contains(&addr) {
+            let offset = addr as usize - 0xC000;
+            if self.mode == HardwareMode::Cgb {
+                let bank = if offset < 0x1000 { 0 } else { self.current_wram_bank.max(1) };
+                let bank_offset = if offset < 0x1000 { offset } else { (offset - 0x1000) + bank * 0x1000 };
+                self.wram[bank_offset] = data;
+            } else {
+                self.wram[offset] = data;
+            }
+        } else if (0xE000..=0xFDFF).contains(&addr) {
+            self.wb(addr - 0x2000, data);
+        } else if (0xFE00..=0xFE9F).contains(&addr) {
+            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
+                self.ppu.oam[(addr - 0xFE00) as usize] = data;
+            } // else it's ignored
+        } else {
+            self.write_io(addr, data);
         }
     }
 
@@ -602,7 +614,8 @@ impl MMU {
             cycles
         };
 
-        let mut vram_dma = std::mem::replace(&mut self.vram_dma, VramDMA::new());
+
+        let mut vram_dma = self.vram_dma.take().unwrap();
         for _ in 0..dots {
             if self.mode != HardwareMode::Dmg && self.ppu.mode != PPUMode::Drawing {
                 vram_dma.tick(1, |source, destination| {
@@ -612,7 +625,7 @@ impl MMU {
                 });
             }
         }
-        self.vram_dma = vram_dma;
+        self.vram_dma = Some(vram_dma);
 
         let mut dma = std::mem::replace(&mut self.dma, DMA::new());
         dma.tick(cycles, is_double_speed, |address, index| {
@@ -624,7 +637,7 @@ impl MMU {
     }
 
     pub fn is_cpu_stalled(&self) -> bool {
-        self.vram_dma.is_cpu_blocked()
+        self.vram_dma.as_ref().unwrap().is_cpu_blocked()
     }
 
     pub fn ww(&mut self, addr: u16, data: u16) {
@@ -648,7 +661,7 @@ impl Initializable for MMU{
         self.ppu = PPU::new();
         self.ppu.cgb = self.mode == HardwareMode::Cgb;
         self.dma = DMA::new();
-        self.vram_dma = VramDMA::new();
+        self.vram_dma = VramDMA::new().into();
         self.dot_remainder = 0;
         if self.has_bios {
             let key0 = self.io[IO_KEY0 as usize];

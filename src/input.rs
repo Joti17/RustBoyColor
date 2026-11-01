@@ -81,7 +81,7 @@ impl Pads {
 
 
 pub fn get_input(mmu: &mut MMU, window: &mut minifb::Window, input: &mut Pads) {
-    let start_joyp = mmu.rb(0xFF00);
+    let start_joyp = mmu.read_io(0xFF00);
 
     let keyboard_state = get_input_keyboard(window, start_joyp);
     let gamepad_state = get_input_gamepad(start_joyp, input);
@@ -94,7 +94,7 @@ pub fn get_input(mmu: &mut MMU, window: &mut minifb::Window, input: &mut Pads) {
     mmu.wb(0xFF00, final_joyp);
 
     if (previous & !button_state & 0x0F) != 0 {
-        let interrupt_flag = mmu.rb(0xFF0F) | 0x10;
+        let interrupt_flag = mmu.read_io(0xFF0F) | 0x10;
         mmu.wb(0xFF0F, interrupt_flag);
     }
 }

@@ -5,6 +5,7 @@ use crate::initialize::Initializable;
 use crate::mmu::MMU;
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use rand::prelude::IndexedRandom;
+use crate::fpstracker::FpsTracker;
 use crate::input::get_input;
 use crate::mode::ClockSpeed;
 use crate::ppu::PPU;
@@ -17,7 +18,7 @@ mod initialize;
 mod ppu;
 mod input;
 mod dma;
-mod sound;
+mod fpstracker;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
@@ -34,8 +35,8 @@ fn main() {
     // let mut mmu = MMU::new(true, "roms/blargg/instr_timing/instr_timing.gb", "");
     // let mut mmu = MMU::new(true, "roms/LOZ.gb", "bootroms/cgb_boot.bin", "roms/LOZ.sav".to_string().into());
     // let mut mmu = MMU::new(true, "roms/pm.gb", "bootroms/cgb_boot.bin", "roms/pm.sav".to_string().into());
-    let mut mmu = MMU::new(true, "roms/smb.gbc", "bootroms/cgb_boot.bin", "roms/smb.sav".to_string().into());
-
+    // let mut mmu = MMU::new(true, "roms/smb.gbc", "bootroms/cgb_boot.bin", "roms/smb.sav".to_string().into());
+    let mut mmu = MMU::new(true, "roms/badapple.gbc", "bootroms/cgb_boot.bin", "".to_string().into());
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
 
 
@@ -55,13 +56,15 @@ fn main() {
 
     let mut buffer: Vec<u32> = vec![0xFFFFFFFF; WIDTH * HEIGHT];
     let mut overflow_cycles = 0usize;
-    window.set_target_fps(60);
+    // window.set_target_fps(60);
+    window.limit_update_rate(Some(Duration::from_nanos((1_000_000_000.0 / 59.7275) as u64)));
     let mut input = input::Pads::new();
 
     let mut cycles = 0u8;
     
 
     let mut frame = 0u32;
+    // let mut tracker = FpsTracker::new();
     while window.is_open() {
         let cycles_per_frame;
         if cpu.speed == ClockSpeed::Double{
@@ -71,8 +74,11 @@ fn main() {
         }
         let mut cycles = overflow_cycles;
         frame += 1;
-        if frame & 1023 == 0{ // ~ once every 17s
+        // tracker.update();
+        if frame & 1023 == 0{ // ~ once every 
             mmu.save();
+            // println!("{} fps", tracker.get_fps());
+            println!("{} fps", window.get_fps());
         }
         input.poll();
         while cycles < cycles_per_frame {
@@ -86,7 +92,7 @@ fn main() {
 
             let dots = mmu.tick(cpu.speed == ClockSpeed::Double, c as u16);
             if mmu.tick_ppu(dots) {
-                mmu.vram_dma.on_hblank();
+                mmu.vram_dma.as_mut().unwrap().on_hblank();
             }
         }
         overflow_cycles = cycles.saturating_sub(cycles_per_frame);
@@ -99,10 +105,6 @@ fn main() {
             *dst = PPU::rgb555_to_xrgb8888(src);
         }
         let lit = mmu.ppu.framebuffer.iter().filter(|&&p| p != 0).count();
-        if frame % 60 == 0{
-            println!("lcd={} ly={} cgb={} bgp={:02X} nonzero={}",
-                     mmu.ppu.lcd_enabled(), mmu.ppu.ly, mmu.ppu.cgb, mmu.ppu.bgp, lit);
-        }
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
         input.end_frame();
     }
