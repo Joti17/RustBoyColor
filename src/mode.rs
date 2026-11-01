@@ -39,8 +39,8 @@ pub const TAC_SPEED: [[u32; 4]; 2] = [[4096, 262144, 65536, 16384],
 #[repr(usize)]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PPUMode {
-    HBlank = 0,
-    VBlank = 1,
-    OAM    = 2,
-    VRAM   = 3,
+    HBlank  = 0,
+    VBlank  = 1,
+    OAM     = 2,
+    Drawing = 3,
 }

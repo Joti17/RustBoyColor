@@ -5,7 +5,7 @@ use crate::dma::{DMA, VramDMA};
 use crate::initialize::Initializable;
 use crate::mbc;
 use crate::mbc::*;
-use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, PPUMode, TAC_SPEED};
+use crate::mode::{ClockSpeed, DIVSpeed, HardwareMode, Interrupt, PPUMode, TAC_SPEED};
 use crate::ppu::PPU;
 
 const WRAM_OFFSET: usize = 0xC000;
@@ -21,6 +21,8 @@ const IO_KEY0: u8 = 0x4C;
 const IO_SIZE: usize = 0x80;
 
 const OAM_SIZE: usize = 0xA0;
+
+const IF: u16 = 0xFF0F;
 
 pub struct MMU {
     wram: [u8; WRAM_SIZE],
@@ -218,11 +220,11 @@ impl Cartridge {
         self.cartridge_type = self.rom[0x147];
 
         let mut checksum: u8 = 0;
-        for addr in 0x134..0x14C{
+        for addr in 0x134..=0x14C{
             checksum = checksum.wrapping_sub(self.rom[addr]).wrapping_sub(1);
         }
 
-        if !self.rom[0x148] == checksum {
+        if !self.rom[0x14D] == checksum {
             panic!("Invalid checksum");
         }
     }
@@ -339,7 +341,7 @@ impl MMU {
             return self.mbc.read_rom(addr);
         }
         if (0x8000..=0x9FFF).contains(&addr) {
-            return if self.ppu.mode != PPUMode::VRAM {
+            return if self.ppu.mode != PPUMode::Drawing {
                 self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000]
             } else {
                 0xFF
@@ -361,7 +363,7 @@ impl MMU {
              return self.rb_unrestricted(addr - 0x2000);
         }
         if (0xFE00..=0xFE9F).contains(&addr) {
-            return if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
+            return if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
                 self.ppu.oam[(addr - 0xFE00) as usize]
             } else {
                 0xFF
@@ -376,7 +378,7 @@ impl MMU {
                 0x07 => self.timer.tac | 0xF8,
                 0x46 => self.io[reg as usize],
                 0x40 => self.ppu.read_lcdc(),
-                0x44 => self.ppu.ly(),
+                0x44 => self.ppu.ly,
                 0x51..=0x55 if self.mode != HardwareMode::Dmg => {
                     self.vram_dma.read_register(reg)
                 }
@@ -404,6 +406,14 @@ impl MMU {
         0xFF
     }
 
+    pub fn trigger_interrupt(&mut self, interrupt: Interrupt) {
+        self.wb(IF, self.rb(IF) | interrupt as u8);
+    }
+
+    pub fn tick_ppu(&mut self, dots: u16) -> bool{
+        self.ppu.tick(dots, self)
+    }
+
     pub fn wb(&mut self, addr: u16, data: u8) {
         if self.dma.is_active()
             && !(0xFF80..=0xFFFE).contains(&addr)
@@ -415,7 +425,7 @@ impl MMU {
         if addr < 0x8000 {
             self.mbc.write_rom(addr, data);
         } else if (0x8000..=0x9FFF).contains(&addr) {
-            if self.ppu.mode != PPUMode::VRAM{
+            if self.ppu.mode != PPUMode::Drawing {
                 self.ppu.vram[self.ppu.vram_bank as usize][addr as usize - 0x8000] = data;
             }
         } else if (0xA000..=0xBFFF).contains(&addr) {
@@ -432,7 +442,7 @@ impl MMU {
         } else if (0xE000..=0xFDFF).contains(&addr) {
             self.wb(addr - 0x2000, data);
         } else if (0xFE00..=0xFE9F).contains(&addr) {
-            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::VRAM {
+            if self.ppu.mode != PPUMode::OAM && self.ppu.mode != PPUMode::Drawing {
                 self.ppu.oam[(addr - 0xFE00) as usize] = data;
             } // else it's ignored
         } else if (0xFF00..=0xFF7F).contains(&addr) {
@@ -524,16 +534,12 @@ impl MMU {
 
         let mut vram_dma = std::mem::replace(&mut self.vram_dma, VramDMA::new());
         for _ in 0..dots {
-            if self.mode != HardwareMode::Dmg && self.ppu.mode != PPUMode::VRAM {
+            if self.mode != HardwareMode::Dmg && self.ppu.mode != PPUMode::Drawing {
                 vram_dma.tick(1, |source, destination| {
                     let value = self.rb_unrestricted(source);
                     let bank = self.ppu.vram_bank as usize;
                     self.ppu.vram[bank][(destination - 0x8000) as usize] = value;
                 });
-            }
-
-            if self.ppu.tick(1) {
-                vram_dma.on_hblank();
             }
         }
         self.vram_dma = vram_dma;

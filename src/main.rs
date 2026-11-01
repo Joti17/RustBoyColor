@@ -85,6 +85,14 @@ fn main() {
                 cpu.speed == ClockSpeed::Double,
                 cycles_this_instruction as u16,
             );
+            let dots = if cpu.speed != ClockSpeed::Double {
+                cycles_this_instruction / 2
+            } else {
+                cycles_this_instruction
+            };
+            if mmu.tick_ppu(dots as u16) {
+                mmu.vram_dma.on_hblank();
+            }
         }
         overflow_cycles = cycles - cycles_per_frame;
 
