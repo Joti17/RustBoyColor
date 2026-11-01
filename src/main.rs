@@ -1,11 +1,13 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
 use std::time::{Duration, Instant};
+use gilrs::{Button, Event};
 use crate::initialize::Initializable;
 use crate::mmu::MMU;
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use rand::prelude::IndexedRandom;
 use crate::input::get_input;
 use crate::mode::ClockSpeed;
+use crate::ppu::PPU;
 
 mod cpu;
 mod mmu;
@@ -15,31 +17,30 @@ mod initialize;
 mod ppu;
 mod input;
 mod dma;
-mod stub_ppu;
+mod sound;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
 
 fn main() {
     println!("Hello, world!");
-    let is_ppu_finished = true;
-    // let mut mmu = MMU::new(true, "roms/whichboot.gb", "bootroms/cgb_boot.bin");
+    // let mut mmu = MMU::new(true, "roms/whichboot.gb", "bootroms/cgb_boot.bin", None);
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/09-op r,r.gb", "bootroms/cgb_boot.bin");
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/cpu_instrs.gb", "");
-    // let mut mmu = MMU::new(true, "roms/tests/tobu.gb", "");
-    // let mut mmu = MMU::new(true, "roms/tests/moneye/interrupt_time/interrupt_time.gb", "");
+    // let mut mmu = MMU::new(true, "roms/tests/bully.gb", "bootroms/cgb_boot.bin", None);
+    // let mut mmu = MMU::new(true, "roms/blargg/interrupt_time/interrupt_time.gb", "bootroms/cgb_boot.bin", None);
     // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/10-bit ops.gb", "");
-    // let mut mmu = MMU::new(true, "roms/blargg/halt_bug.gb", "");
+    // let mut mmu = MMU::new(true, "roms/blargg/halt_bug.gb", "bootroms/cgb_boot.bin", None);
     // let mut mmu = MMU::new(true, "roms/blargg/instr_timing/instr_timing.gb", "");
-    // let mut mmu = MMU::new(true, "roms/LOZ.gb", "roms/gb_bios.bin");
+    // let mut mmu = MMU::new(true, "roms/LOZ.gb", "bootroms/cgb_boot.bin", "roms/LOZ.sav".to_string().into());
+    // let mut mmu = MMU::new(true, "roms/pm.gb", "bootroms/cgb_boot.bin", "roms/pm.sav".to_string().into());
+    let mut mmu = MMU::new(true, "roms/smb.gbc", "bootroms/cgb_boot.bin", "roms/smb.sav".to_string().into());
 
-
-
-    let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
+    // let mut mmu = MMU::new(true, "roms/blargg/cpu_instrs/individual/02-interrupts.gb", "");
 
 
     mmu.init();
-    let mut cpu = cpu::Cpu::new(true, false);
+    let mut cpu = cpu::Cpu::new(true, true);
     
     let start_time = Instant::now();
     let timeout = Duration::from_secs(60);
@@ -52,12 +53,15 @@ fn main() {
         ).unwrap();
 
 
-    let mut buffer: Vec<u32> = vec![0xFFFFFFFF; WIDTH * HEIGHT * 4];
-    let mut input = gilrs::Gilrs::new().unwrap();
+    let mut buffer: Vec<u32> = vec![0xFFFFFFFF; WIDTH * HEIGHT];
+    let mut overflow_cycles = 0usize;
+    window.set_target_fps(60);
+    let mut input = input::Pads::new();
 
     let mut cycles = 0u8;
     
 
+    let mut frame = 0u32;
     while window.is_open() {
         let cycles_per_frame;
         if cpu.speed == ClockSpeed::Double{
@@ -65,42 +69,42 @@ fn main() {
         } else {
             cycles_per_frame = 70224;
         }
-        let mut overflow_cycles = 0;
         let mut cycles = overflow_cycles;
-        let mut cycles_this_instruction = 0;
+        frame += 1;
+        if frame & 1023 == 0{ // ~ once every 17s
+            mmu.save();
+        }
+        input.poll();
         while cycles < cycles_per_frame {
+
             get_input(&mut mmu, &mut window, &mut input);
 
-            if start_time.elapsed() > timeout {
-                println!("Timeout reached, exiting.");
-                break;
-            }
 
-            cycles_this_instruction = cpu.execute(&mut mmu) as usize;
-            cycles += cycles_this_instruction;
-            mmu.tick_timer(cycles_this_instruction as u16);
-            mmu.tick(
-                cpu.speed == ClockSpeed::Double,
-                cycles_this_instruction as u16,
-            );
-            let dots = if cpu.speed != ClockSpeed::Double {
-                cycles_this_instruction / 2
-            } else {
-                cycles_this_instruction
-            };
-            if mmu.tick_ppu(dots as u16) {
+            let c = cpu.execute(&mut mmu) as usize;
+            cycles += c;
+            mmu.tick_timer(c as u16);
+
+            let dots = mmu.tick(cpu.speed == ClockSpeed::Double, c as u16);
+            if mmu.tick_ppu(dots) {
                 mmu.vram_dma.on_hblank();
             }
         }
-        overflow_cycles = cycles - cycles_per_frame;
+        overflow_cycles = cycles.saturating_sub(cycles_per_frame);
 
         if window.is_key_pressed(Key::Escape, KeyRepeat::No) {
             mmu.ppu.dump_vram();
         }
 
-        if is_ppu_finished {
-            window.update_with_buffer(buffer.as_slice(), WIDTH, HEIGHT).unwrap();
+        for (dst, &src) in buffer.iter_mut().zip(mmu.ppu.framebuffer.iter()) {
+            *dst = PPU::rgb555_to_xrgb8888(src);
         }
+        let lit = mmu.ppu.framebuffer.iter().filter(|&&p| p != 0).count();
+        if frame % 60 == 0{
+            println!("lcd={} ly={} cgb={} bgp={:02X} nonzero={}",
+                     mmu.ppu.lcd_enabled(), mmu.ppu.ly, mmu.ppu.cgb, mmu.ppu.bgp, lit);
+        }
+        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+        input.end_frame();
     }
 
 }

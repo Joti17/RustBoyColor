@@ -833,7 +833,7 @@ impl Cpu{
             0x21 => self.set_HL(self.d16(mmu)),
             0x22 => {
                 mmu.wb(self.HL(), self.a);
-                self.set_HL(self.HL()+1)
+                self.set_HL(self.HL().wrapping_add(1))
             },
             0x26 => self.h = self.d8(mmu),
             0x2A => {

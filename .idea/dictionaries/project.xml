@@ -2,6 +2,7 @@
   <dictionary name="project">
     <words>
       <w>VBLANK</w>
+      <w>opri</w>
       <w>ramdata</w>
       <w>wram</w>
     </words>

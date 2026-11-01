@@ -3,10 +3,16 @@ name = "RustBoyColor"
 version = "0.1.0"
 edition = "2024"
 
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+[profile.dev]
+debug = true
+
 [dependencies]
 maplit = "1.0.2"
 minifb = "0.29.0"
+sdl2 = { version = "0.38.0", features = ["bundled", "static-link"] }
 gilrs = "0.11.2"
-walkdir = "2.5.0"
 rand = "0.10.3"
 bytemuck = { version = "1.25.2", features = ["derive"] }

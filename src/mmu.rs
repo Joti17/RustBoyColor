@@ -1,6 +1,9 @@
 #![allow(unused_variables, non_snake_case, dead_code, unused)]
+
+use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
+use std::path::Path;
 use crate::dma::{DMA, VramDMA};
 use crate::initialize::Initializable;
 use crate::mbc;
@@ -44,6 +47,7 @@ pub struct MMU {
     pub dma: DMA,
     pub vram_dma: VramDMA,
     dot_remainder: u8,
+    pub save_file: Option<String>
 
 }
 
@@ -224,8 +228,8 @@ impl Cartridge {
             checksum = checksum.wrapping_sub(self.rom[addr]).wrapping_sub(1);
         }
 
-        if !self.rom[0x14D] == checksum {
-            panic!("Invalid checksum");
+        if self.rom[0x14D] != checksum {
+            println!("Warning: invalid header checksum");
         }
     }
 }
@@ -254,7 +258,7 @@ pub(crate) fn random(input: &mut [u8]) {
 }
 
 impl MMU {
-    pub fn new(is_gbc: bool, rom_file: &str, bios: &str) -> MMU {
+    pub fn new(is_gbc: bool, rom_file: &str, bios: &str, save_file: Option<String>) -> MMU {
         let has_bios;
         if bios == ""{
             has_bios = false;
@@ -275,7 +279,7 @@ impl MMU {
         let mut cartridge = Cartridge::new(rom_file);
         cartridge.parse_header(&mut io, &mut mode);
         // if bios != ""
-        let mbc: Box<dyn MBC> = if has_bios {
+        let mut mbc: Box<dyn MBC> = if has_bios {
             let bios = std::fs::read(bios).unwrap();
             match cartridge.cartridge_type{
                 0 => Box::new(mbc0::MBC0::with_bios(cartridge.rom.clone(), bios)),
@@ -297,6 +301,13 @@ impl MMU {
                 _ => panic!("Unsupported MBC type {:?}!", cartridge.cartridge_type),
             }
         };
+        if mbc.is_battery_backed() {
+            if let Some(save_file) = &save_file {
+                if Path::new(save_file).exists() {
+                    mbc.load_ram(&fs::read(save_file).unwrap());
+                }
+            }
+        }
 
         Self {
             wram,
@@ -310,16 +321,24 @@ impl MMU {
             mbc,
             has_bios,
             timer: Timer::new(),
-            ppu: PPU::new(),
+            ppu: {
+                let mut ppu = PPU::new();
+                ppu.cgb = mode == HardwareMode::Cgb;
+                ppu
+            },
             ie: 0x00,
             cpu_external_stall: 0,
             dma: DMA::new(),
             vram_dma: VramDMA::new(),
             dot_remainder: 0,
+            save_file,
         }
+
 
         // n.load_rom(rom_file, &mut n.wram).unwrap();
     }
+
+
 
     pub fn tick_timer(&mut self, cycles: u16) {
         self.timer.tick(cycles, &mut self.io[0x0F]);
@@ -376,9 +395,19 @@ impl MMU {
                 0x05 => self.timer.tima,
                 0x06 => self.timer.tma,
                 0x07 => self.timer.tac | 0xF8,
+                0x0F => self.io[reg as usize] | 0xE0,
                 0x46 => self.io[reg as usize],
                 0x40 => self.ppu.read_lcdc(),
+                0x41 => self.ppu.get_stat(),
+                0x42 => self.ppu.scy,
+                0x43 => self.ppu.scx,
                 0x44 => self.ppu.ly,
+                0x45 => self.ppu.lyc,
+                0x47 => self.ppu.bgp,
+                0x48 => self.ppu.obp0,
+                0x49 => self.ppu.obp1,
+                0x4A => self.ppu.wy,
+                0x4B => self.ppu.wx,
                 0x51..=0x55 if self.mode != HardwareMode::Dmg => {
                     self.vram_dma.read_register(reg)
                 }
@@ -391,6 +420,17 @@ impl MMU {
                         self.io[reg as usize]
                     }
                 }
+                0x68 if self.mode != HardwareMode::Dmg => self.ppu.read_bcps(),
+                0x69 if self.mode != HardwareMode::Dmg => {
+                    if self.ppu.mode != PPUMode::Drawing { self.ppu.read_bcpd() } else { 0xFF }
+                }
+                0x6A if self.mode != HardwareMode::Dmg => self.ppu.read_ocps(),
+                0x6B if self.mode != HardwareMode::Dmg => {
+                    if self.ppu.mode != PPUMode::Drawing { self.ppu.read_ocpd() } else { 0xFF }
+                }
+                0x68..=0x6B => 0xFF,
+                0x6C if self.mode != HardwareMode::Dmg => self.ppu.read_opri(),
+                0x6C => 0xFF,
                 _ => {
                     self.io[reg as usize]
                 }
@@ -406,12 +446,22 @@ impl MMU {
         0xFF
     }
 
+    pub fn save(&mut self){
+        if let Some(save_file) = &self.save_file {
+            if self.mbc.is_battery_backed() && self.mbc.check_and_reset_ram_updated(){
+                println!("Saving!");
+                fs::write(save_file, self.mbc.dump_ram()).unwrap();
+            }
+        }
+    }
     pub fn trigger_interrupt(&mut self, interrupt: Interrupt) {
-        self.wb(IF, self.rb(IF) | interrupt as u8);
+        self.io[0x0F] |= interrupt as u8;
     }
 
     pub fn tick_ppu(&mut self, dots: u16) -> bool{
-        self.ppu.tick(dots, self)
+        let res = self.ppu.tick(dots);
+        self.wb(IF, self.rb(IF) | res.interrupts);
+        res.hblank
     }
 
     pub fn wb(&mut self, addr: u16, data: u8) {
@@ -492,6 +542,16 @@ impl MMU {
                     }
                     self.writeIO(reg, data);
                 }
+                0x41 => self.ppu.write_stat(data),
+                0x42 => self.ppu.scy = data,
+                0x43 => self.ppu.scx = data,
+                0x44 => {} // LY is read-only
+                0x45 => self.ppu.lyc = data,
+                0x47 => self.ppu.bgp = data,
+                0x48 => self.ppu.obp0 = data,
+                0x49 => self.ppu.obp1 = data,
+                0x4A => self.ppu.wy = data,
+                0x4B => self.ppu.wx = data,
                 0x51..=0x55 if self.mode != HardwareMode::Dmg => {
                     self.vram_dma
                         .write_register(
@@ -501,7 +561,6 @@ impl MMU {
                             self.ppu.mode == PPUMode::HBlank,
                         );
                 }
-                0x51..=0x55 => {}
                 0x4F => self.ppu.vram_bank = data & 0x01,
                 0x50 => {
                     if self.has_bios && data != 0 {
@@ -509,6 +568,17 @@ impl MMU {
                         self.mbc.disable_bios();
                     }
                 }
+                0x68 if self.mode != HardwareMode::Dmg => self.ppu.write_bcps(data),
+                0x69 if self.mode != HardwareMode::Dmg => {
+                    if self.ppu.mode != PPUMode::Drawing { self.ppu.write_bcpd(data); }
+                }
+                0x6A if self.mode != HardwareMode::Dmg => self.ppu.write_ocps(data),
+                0x6B if self.mode != HardwareMode::Dmg => {
+                    if self.ppu.mode != PPUMode::Drawing { self.ppu.write_ocpd(data); }
+                }
+                0x68..=0x6B => {}
+                0x6C if self.mode != HardwareMode::Dmg => self.ppu.write_opri(data),
+                0x6C => {}
                 0x70 => {
                     if self.mode == HardwareMode::Cgb {
                         self.current_wram_bank = (data & 0x7) as usize;
@@ -523,7 +593,7 @@ impl MMU {
         }
     }
 
-    pub fn tick(&mut self, is_double_speed: bool, cycles: u16){
+    pub fn tick(&mut self, is_double_speed: bool, cycles: u16) -> u16{
         let dots = if is_double_speed {
             let total_cycles = cycles as u32 + self.dot_remainder as u32;
             self.dot_remainder = (total_cycles % 2) as u8;
@@ -550,6 +620,7 @@ impl MMU {
             self.ppu.oam[index] = value;
         });
         self.dma = dma;
+        dots
     }
 
     pub fn is_cpu_stalled(&self) -> bool {
@@ -575,9 +646,19 @@ impl MMU {
 impl Initializable for MMU{
     fn init(&mut self){
         self.ppu = PPU::new();
+        self.ppu.cgb = self.mode == HardwareMode::Cgb;
         self.dma = DMA::new();
         self.vram_dma = VramDMA::new();
         self.dot_remainder = 0;
+        if self.has_bios {
+            let key0 = self.io[IO_KEY0 as usize];
+            self.io = [0; IO_SIZE];
+            self.io[IO_KEY0 as usize] = key0;
+            self.timer = Timer::new();
+            self.ie = 0x00;
+            self.cpu_external_stall = 0;
+            return;
+        }
         self.wb(0xFF00, if self.has_bios { 0xCF } else { 0xCF });
         self.wb(0xFF01, if self.has_bios { 0x00 } else { 0x00 });
         self.wb(0xFF02, if self.has_bios { 0x7E } else { 0x7F });
@@ -613,13 +694,13 @@ impl Initializable for MMU{
         self.wb(0xFF43, 0x00);
         self.wb(0xFF44, if self.has_bios { 0x91 } else { 0x00 });
         self.wb(0xFF45, 0x00);
-        self.wb(0xFF46, 0xFF);
+        self.io[0x46] = 0xFF;
         self.wb(0xFF47, 0xFC);
         self.wb(0xFF48, 0x00);
         self.wb(0xFF49, 0x00);
         self.wb(0xFF4A, 0x00);
         self.wb(0xFF4B, 0x00);
-        self.wb(0xFF4C, 0x00);
+        self.io[0x4C] = 0x00; // don't want the side effects to kick in
         self.wb(0xFF4D, 0x7E);
         self.wb(0xFF4F, 0xFE);
         self.wb(0xFF50, if self.has_bios { 0x00 } else { 0x01 });
